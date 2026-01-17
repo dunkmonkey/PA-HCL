@@ -102,6 +102,38 @@ def setup_logging(
     return log_file
 
 
+def setup_logger(
+    name: str,
+    log_dir: Optional[Union[str, Path]] = None,
+    experiment_name: Optional[str] = None,
+    level: int = logging.INFO,
+    use_rich: bool = True,
+    log_file: Optional[Union[str, Path]] = None
+) -> logging.Logger:
+    """
+    兼容旧接口的日志初始化函数。
+
+    参数:
+        name: 日志记录器名称
+        log_dir: 日志的基础目录
+        experiment_name: 实验名称
+        level: 日志级别
+        use_rich: 是否对控制台输出使用 rich 格式
+
+    返回:
+        配置好的日志记录器实例
+    """
+    if log_file is None:
+        if log_dir is None or experiment_name is None:
+            raise ValueError("log_dir and experiment_name must be provided when log_file is None")
+        log_dir = Path(log_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = log_dir / experiment_name / f"{timestamp}.log"
+    log_file = Path(log_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    return get_logger(name, level=level, log_file=log_file, use_rich=use_rich)
+
+
 class AverageMeter:
     """
     计算并存储平均值和当前值。

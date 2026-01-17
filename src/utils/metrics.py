@@ -78,7 +78,7 @@ def compute_metrics(
     y_true: Union[np.ndarray, List],
     y_pred: Union[np.ndarray, List],
     y_score: Optional[Union[np.ndarray, List]] = None,
-    num_classes: int = 2
+    num_classes: Optional[int] = None
 ) -> Dict[str, float]:
     """
     计算综合分类指标。
@@ -96,6 +96,8 @@ def compute_metrics(
     y_pred = np.asarray(y_pred)
     
     metrics = {}
+    if num_classes is None:
+        num_classes = len(np.unique(y_true))
     
     # 基础指标
     metrics["accuracy"] = accuracy_score(y_true, y_pred)
@@ -103,9 +105,9 @@ def compute_metrics(
     # 每类指标和平均指标
     if num_classes == 2:
         # 二分类
-        metrics["precision"] = precision_score(y_true, y_pred, zero_division=0)
-        metrics["recall"] = recall_score(y_true, y_pred, zero_division=0)
-        metrics["f1"] = f1_score(y_true, y_pred, zero_division=0)
+        metrics["precision"] = precision_score(y_true, y_pred, average="binary", zero_division=0)
+        metrics["recall"] = recall_score(y_true, y_pred, average="binary", zero_division=0)
+        metrics["f1"] = f1_score(y_true, y_pred, average="binary", zero_division=0)
         metrics["specificity"] = compute_specificity(y_true, y_pred)
     else:
         # 多分类
@@ -121,6 +123,10 @@ def compute_metrics(
         metrics["f1_weighted"] = f1_score(
             y_true, y_pred, average="weighted", zero_division=0
         )
+        # 兼容通用字段
+        metrics["precision"] = metrics["precision_macro"]
+        metrics["recall"] = metrics["recall_macro"]
+        metrics["f1"] = metrics["f1_macro"]
     
     # 基于分数的指标
     if y_score is not None:
@@ -130,6 +136,27 @@ def compute_metrics(
             metrics["auprc"] = compute_auprc(y_true, y_score)
     
     return metrics
+
+
+def compute_classification_metrics(
+    y_true: Union[np.ndarray, List],
+    y_pred: Union[np.ndarray, List],
+    y_score: Optional[Union[np.ndarray, List]] = None,
+    num_classes: Optional[int] = None
+) -> Dict[str, float]:
+    """
+    兼容接口：计算分类相关指标。
+
+    参数:
+        y_true: 真实标签
+        y_pred: 预测标签
+        y_score: 预测分数/概率（可选）
+        num_classes: 类别数量
+
+    返回:
+        指标字典
+    """
+    return compute_metrics(y_true, y_pred, y_score, num_classes)
 
 
 def compute_specificity(

@@ -37,21 +37,21 @@ class PAHCLModel(nn.Module):
         encoder_type: str = "cnn_mamba",
         in_channels: int = 1,
         cnn_channels: list = [32, 64, 128, 256],
-        cnn_kernel_sizes: list = [7, 5, 5, 3],
-        cnn_strides: list = [2, 2, 2, 2],
+        cnn_kernel_sizes: Optional[list] = None,
+        cnn_strides: Optional[list] = None,
         cnn_dropout: float = 0.1,
         mamba_d_model: int = 256,
         mamba_n_layers: int = 4,
-        mamba_d_state: int = 16,
+        mamba_d_state: int = 8,
         mamba_expand: int = 2,
         mamba_dropout: float = 0.1,
         pool_type: str = "mean",
         # 投影头设置
-        cycle_proj_hidden: int = 512,
-        cycle_proj_output: int = 128,
+        cycle_proj_hidden: int = 128,
+        cycle_proj_output: int = 32,
         cycle_proj_layers: int = 2,
-        sub_proj_hidden: int = 256,
-        sub_proj_output: int = 64,
+        sub_proj_hidden: int = 64,
+        sub_proj_output: int = 16,
         # 子结构设置
         num_substructures: int = 4,
     ):
@@ -80,6 +80,17 @@ class PAHCLModel(nn.Module):
         
         self.num_substructures = num_substructures
         
+        # 处理 CNN 参数默认值，使其与层数一致
+        if cnn_kernel_sizes is None:
+            if len(cnn_channels) == 2:
+                cnn_kernel_sizes = [7, 5]
+            elif len(cnn_channels) == 3:
+                cnn_kernel_sizes = [7, 5, 3]
+            else:
+                cnn_kernel_sizes = [7, 5, 5, 3]
+        if cnn_strides is None:
+            cnn_strides = [2] * len(cnn_channels)
+
         # 构建编码器
         if encoder_type == "cnn_mamba":
             self.encoder = CNNMambaEncoder(
@@ -117,6 +128,7 @@ class PAHCLModel(nn.Module):
         )
         
         # 子结构级投影头
+        # 子结构特征来自 CNN 中间层，其通道数为 sub_feature_dim
         self.sub_projector = SubstructureProjectionHead(
             input_dim=sub_feature_dim,
             hidden_dim=sub_proj_hidden,
@@ -260,9 +272,10 @@ class PAHCLModel(nn.Module):
         # 重塑以进行批量处理
         subs_flat = subs.reshape(B * K, 1, L)
         
-        # 仅使用 CNN 主干获取特征
-        sub_feats = self.encoder.cnn(subs_flat)  # [B*K, C, L']
-        
+        # 仅使用 CNN 主干获取特征（取倒数第二层以匹配子结构通道维度）
+        _, intermediates = self.encoder.cnn(subs_flat, return_intermediate=True)
+        sub_feats = intermediates[-2] if len(intermediates) >= 2 else intermediates[-1]
+
         # 重塑回来
         C_out = sub_feats.shape[1]
         L_out = sub_feats.shape[2]

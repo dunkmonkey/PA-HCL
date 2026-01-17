@@ -48,9 +48,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # 测试配置
- BATCH_SIZE = 4
- SIGNAL_LENGTH = 5000  # 5000Hz 采样率下的 1 秒
- NUM_SUBSTRUCTURES = 4
+BATCH_SIZE = 4
+SIGNAL_LENGTH = 5000  # 5000Hz 采样率下的 1 秒
+NUM_SUBSTRUCTURES = 4
 
 
 # ============== Fixtures ==============
