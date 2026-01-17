@@ -1,0 +1,111 @@
+# PA-HCL 预训练配置
+# ==================================
+# 使用分层对比学习的自监督预训练配置
+
+# 实验信息
+experiment:
+  name: "pahcl_pretrain"
+  description: "PCG 数据的 PA-HCL 自监督预训练"
+
+# 数据设置
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  sample_rate: 5000
+  segment_duration: 1.0  # 每个心动周期片段的秒数
+  num_substructures: 4   # K (S1, 收缩期, S2, 舒张期)
+  
+  # 预处理
+  bandpass_low: 25
+  bandpass_high: 400
+  min_cycle_duration: 0.4
+  max_cycle_duration: 1.5
+  min_snr: 5.0
+
+# 模型架构
+model:
+  encoder_type: "cnn_mamba"  # "cnn_mamba", "cnn_transformer", "cnn_only"
+  
+  # CNN 主干网络
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]  # 总下采样: 16x
+  cnn_dropout: 0.1
+  
+  # Mamba 设置
+  mamba_d_model: 256
+  mamba_n_layers: 4
+  mamba_d_state: 16
+  mamba_expand: 2
+  mamba_dropout: 0.1
+  
+  # 池化层
+  pool_type: "mean"  # "mean", "max", "cls"
+  
+  # 投影头
+  proj_hidden_dim: 512
+  proj_output_dim: 128
+  proj_num_layers: 2
+  
+  # 子结构投影
+  sub_proj_hidden_dim: 256
+  sub_proj_output_dim: 64
+
+# 损失函数
+loss:
+  temperature: 0.07
+  lambda_cycle: 1.0
+  lambda_sub: 1.0
+  align_substructures: true
+
+# 训练设置
+training:
+  # 基础设置
+  num_epochs: 100
+  batch_size: 64
+  num_workers: 4
+  
+  # 优化器
+  learning_rate: 1e-3
+  weight_decay: 1e-4
+  
+  # 调度器
+  warmup_epochs: 10
+  min_lr: 1e-6
+  
+  # 训练技巧
+  use_amp: true
+  gradient_accumulation_steps: 1
+  grad_clip_norm: 1.0
+  
+  # 日志和保存
+  log_interval: 50
+  save_interval: 10
+
+# 数据增强
+augmentation:
+  # 时域
+  time_shift_max: 0.1
+  amplitude_scale_range: [0.8, 1.2]
+  gaussian_noise_std: 0.01
+  time_stretch_range: [0.9, 1.1]
+  
+  # 频域
+  time_mask_max_ratio: 0.006  # 30ms / 5000Hz 片段
+  freq_mask_max_ratio: 0.15
+  
+  # 概率
+  prob_time_shift: 0.5
+  prob_amplitude_scale: 0.5
+  prob_gaussian_noise: 0.5
+  prob_time_stretch: 0.3
+  prob_time_mask: 0.5
+  prob_freq_mask: 0.3
+
+# 分布式训练
+distributed:
+  backend: "nccl"
+  find_unused_parameters: false
+
+# 可复现性
+seed: 42

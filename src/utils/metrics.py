@@ -1,0 +1,263 @@
+"""
+PA-HCL 的评估指标。
+"""
+
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
+
+
+def compute_auroc(
+    y_true: Union[np.ndarray, List],
+    y_score: Union[np.ndarray, List],
+    multi_class: str = "ovr"
+) -> float:
+    """
+    计算接收者操作特征曲线下面积 (AUROC)。
+    
+    参数:
+        y_true: 真实标签
+        y_score: 预测分数/概率
+        multi_class: 多分类策略 ('ovr' 或 'ovo')
+        
+    返回:
+        AUROC 分数
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    
+    try:
+        if len(y_score.shape) == 1 or y_score.shape[1] == 1:
+            # 二分类
+            return roc_auc_score(y_true, y_score.ravel())
+        else:
+            # 多分类
+            return roc_auc_score(y_true, y_score, multi_class=multi_class)
+    except ValueError:
+        # 处理边界情况 (例如: 仅存在一个类别)
+        return 0.0
+
+
+def compute_auprc(
+    y_true: Union[np.ndarray, List],
+    y_score: Union[np.ndarray, List]
+) -> float:
+    """
+    计算精确率-召回率曲线下面积 (AUPRC)。
+    
+    参数:
+        y_true: 真实标签
+        y_score: 预测分数/概率
+        
+    返回:
+        AUPRC 分数
+    """
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score).ravel()
+    
+    try:
+        return average_precision_score(y_true, y_score)
+    except ValueError:
+        return 0.0
+
+
+def compute_metrics(
+    y_true: Union[np.ndarray, List],
+    y_pred: Union[np.ndarray, List],
+    y_score: Optional[Union[np.ndarray, List]] = None,
+    num_classes: int = 2
+) -> Dict[str, float]:
+    """
+    计算综合分类指标。
+    
+    参数:
+        y_true: 真实标签
+        y_pred: 预测标签
+        y_score: 预测分数/概率（可选）
+        num_classes: 类别数量
+        
+    返回:
+        包含各种指标的字典
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    metrics = {}
+    
+    # 基础指标
+    metrics["accuracy"] = accuracy_score(y_true, y_pred)
+    
+    # 每类指标和平均指标
+    if num_classes == 2:
+        # 二分类
+        metrics["precision"] = precision_score(y_true, y_pred, zero_division=0)
+        metrics["recall"] = recall_score(y_true, y_pred, zero_division=0)
+        metrics["f1"] = f1_score(y_true, y_pred, zero_division=0)
+        metrics["specificity"] = compute_specificity(y_true, y_pred)
+    else:
+        # 多分类
+        metrics["precision_macro"] = precision_score(
+            y_true, y_pred, average="macro", zero_division=0
+        )
+        metrics["recall_macro"] = recall_score(
+            y_true, y_pred, average="macro", zero_division=0
+        )
+        metrics["f1_macro"] = f1_score(
+            y_true, y_pred, average="macro", zero_division=0
+        )
+        metrics["f1_weighted"] = f1_score(
+            y_true, y_pred, average="weighted", zero_division=0
+        )
+    
+    # 基于分数的指标
+    if y_score is not None:
+        y_score = np.asarray(y_score)
+        metrics["auroc"] = compute_auroc(y_true, y_score)
+        if num_classes == 2:
+            metrics["auprc"] = compute_auprc(y_true, y_score)
+    
+    return metrics
+
+
+def compute_specificity(
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> float:
+    """
+    计算特异性 (真负率)。
+    
+    参数:
+        y_true: 真实标签
+        y_pred: 预测标签
+        
+    返回:
+        特异性分数
+    """
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+
+def compute_sensitivity_specificity_curve(
+    y_true: np.ndarray,
+    y_score: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    计算不同阈值下的灵敏度 (TPR) 和特异性。
+    
+    参数:
+        y_true: 真实标签
+        y_score: 预测分数
+        
+    返回:
+        (thresholds, sensitivities, specificities) 的元组
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_score)
+    sensitivities = tpr
+    specificities = 1 - fpr
+    return thresholds, sensitivities, specificities
+
+
+def find_optimal_threshold(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    method: str = "youden"
+) -> Tuple[float, Dict[str, float]]:
+    """
+    查找最佳分类阈值。
+    
+    参数:
+        y_true: 真实标签
+        y_score: 预测分数
+        method: 优化方法 ('youden' 或 'f1')
+        
+    返回:
+        (optimal_threshold, metrics_at_threshold) 的元组
+    """
+    if method == "youden":
+        # 最大化 Youden's J 统计量 (灵敏度 + 特异性 - 1)
+        fpr, tpr, thresholds = roc_curve(y_true, y_score)
+        j_scores = tpr - fpr
+        optimal_idx = np.argmax(j_scores)
+        optimal_threshold = thresholds[optimal_idx]
+    elif method == "f1":
+        # 最大化 F1 分数
+        thresholds = np.linspace(0, 1, 100)
+        f1_scores = []
+        for thresh in thresholds:
+            y_pred = (y_score >= thresh).astype(int)
+            f1_scores.append(f1_score(y_true, y_pred, zero_division=0))
+        optimal_idx = np.argmax(f1_scores)
+        optimal_threshold = thresholds[optimal_idx]
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    # 在最佳阈值处计算指标
+    y_pred_optimal = (y_score >= optimal_threshold).astype(int)
+    metrics = compute_metrics(y_true, y_pred_optimal, y_score)
+    
+    return optimal_threshold, metrics
+
+
+class MetricTracker:
+    """
+    在训练/评估期间跟踪和聚合指标。
+    """
+    
+    def __init__(self):
+        self.reset()
+    
+    def reset(self) -> None:
+        """重置所有跟踪的指标。"""
+        self.predictions = []
+        self.scores = []
+        self.labels = []
+    
+    def update(
+        self,
+        preds: torch.Tensor,
+        labels: torch.Tensor,
+        scores: Optional[torch.Tensor] = None
+    ) -> None:
+        """
+        使用批次预测更新跟踪器。
+        
+        参数:
+            preds: 预测标签
+            labels: 真实标签
+            scores: 预测分数/概率
+        """
+        self.predictions.extend(preds.cpu().numpy().tolist())
+        self.labels.extend(labels.cpu().numpy().tolist())
+        if scores is not None:
+            self.scores.extend(scores.cpu().numpy().tolist())
+    
+    def compute(self, num_classes: int = 2) -> Dict[str, float]:
+        """
+        计算所有指标。
+        
+        参数:
+            num_classes: 类别数量
+            
+        返回:
+            指标字典
+        """
+        y_score = self.scores if self.scores else None
+        return compute_metrics(
+            self.labels,
+            self.predictions,
+            y_score,
+            num_classes
+        )

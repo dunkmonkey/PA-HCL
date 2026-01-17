@@ -1,0 +1,62 @@
+# PA-HCL 微调配置
+# ==================================
+# 下游分类任务的配置
+
+experiment:
+  name: "pahcl_finetune"
+  description: "PA-HCL 下游微调"
+
+# 数据设置 (继承自预训练)
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  sample_rate: 5000
+  segment_duration: 1.0
+  num_substructures: 4
+
+# 模型 (应与预训练模型匹配)
+model:
+  encoder_type: "cnn_mamba"
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]
+  mamba_d_model: 256
+  mamba_n_layers: 4
+
+# 下游任务设置
+downstream:
+  # 分类
+  num_classes: 5  # 正常, MVP, MS, MR, AS (示例)
+  label_map:
+    normal: 0
+    mvp: 1
+    ms: 2
+    mr: 3
+    as: 4
+  
+  # 分类器架构
+  hidden_dim: 128  # 设为 null 以使用线性分类器
+  dropout: 0.3
+  
+  # 训练
+  num_epochs: 50
+  batch_size: 32
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  warmup_epochs: 5
+  
+  # 早停
+  early_stopping_patience: 10
+  
+  # 损失
+  label_smoothing: 0.1
+
+# 训练设置
+training:
+  num_workers: 4
+  use_amp: true
+  log_interval: 20
+  save_interval: 5
+
+# 可复现性
+seed: 42

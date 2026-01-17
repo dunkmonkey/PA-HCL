@@ -1,0 +1,168 @@
+# PA-HCL 默认配置
+# 此文件包含所有默认超参数和设置
+
+# ============== 实验 ==============
+experiment:
+  name: "pa-hcl"
+  seed: 42
+  output_dir: "./checkpoints"
+  log_dir: "./logs"
+  
+# ============== 数据 ==============
+data:
+  # 原始数据设置
+  raw_dir: "./data/raw"
+  processed_dir: "./data/processed"
+  sample_rate: 5000  # Hz
+  
+  # 周期提取
+  cycle:
+    min_duration: 0.4   # 秒，最小周期长度
+    max_duration: 1.5   # 秒，最大周期长度
+    target_length: 4000 # 样本数，重采样后的固定长度 (0.8s * 5000Hz)
+    
+  # 子结构设置
+  num_substructures: 4  # K 值
+  
+  # 质量过滤
+  filter:
+    enabled: true
+    min_snr_db: 10.0
+    
+# ============== 增强 ==============
+augmentation:
+  # 时域
+  time_shift:
+    enabled: true
+    max_shift_ratio: 0.1
+  amplitude_scale:
+    enabled: true
+    min_scale: 0.8
+    max_scale: 1.2
+  gaussian_noise:
+    enabled: true
+    snr_range: [20, 40]  # dB
+    
+  # 频域
+  freq_mask:
+    enabled: true
+    max_mask_ratio: 0.15
+  time_mask:
+    enabled: true
+    max_mask_ratio: 0.1
+    max_mask_width_ms: 30  # 受生理限制
+    
+  # 速度扰动（心率变异模拟）
+  speed_perturb:
+    enabled: true
+    speed_range: [0.9, 1.1]  # ±10%
+
+# ============== 模型 ==============
+model:
+  encoder:
+    type: "cnn_mamba"  # 选项: cnn_only, cnn_transformer, cnn_mamba
+    
+    # CNN 主干
+    cnn:
+      in_channels: 1
+      channels: [32, 64, 128, 256]
+      kernel_sizes: [7, 5, 5, 3]
+      strides: [2, 2, 2, 2]
+      dropout: 0.1
+      
+    # Mamba (SSM) 模块
+    mamba:
+      d_model: 256
+      n_layers: 4
+      d_state: 16
+      expand: 2
+      dropout: 0.1
+      
+  # 用于对比学习的投影头
+  projection_head:
+    hidden_dim: 512
+    output_dim: 128
+    num_layers: 2
+    use_bn: true
+    
+  # 特征维度
+  cycle_feature_dim: 256
+  sub_feature_dim: 128
+
+# ============== 损失 ==============
+loss:
+  # InfoNCE 设置
+  temperature: 0.07
+  
+  # 分层权重
+  lambda_cycle: 1.0
+  lambda_sub: 1.0
+  
+  # 动态权重调度
+  dynamic_weight:
+    enabled: false
+    warmup_epochs: 10
+
+# ============== 训练 ==============
+training:
+  # 预训练
+  pretrain:
+    epochs: 100
+    batch_size: 64
+    
+    # 优化器
+    optimizer:
+      type: "adamw"
+      lr: 1.0e-3
+      weight_decay: 1.0e-4
+      betas: [0.9, 0.999]
+      
+    # 调度器
+    scheduler:
+      type: "cosine"
+      warmup_epochs: 10
+      min_lr: 1.0e-6
+      
+    # 混合精度
+    use_amp: true
+    grad_clip: 1.0
+    
+    #用于大有效批大小的）梯度累积
+    gradient_accumulation_steps: 1
+    
+    # 日志记录
+    log_every_n_steps: 50
+    save_every_n_epochs: 10
+    
+  # 微调
+  finetune:
+    epochs: 50
+    batch_size: 32
+    
+    # 两阶段学习率
+    encoder_lr: 1.0e-4
+    head_lr: 1.0e-3
+    
+    # 冻结编码器以进行线性评估
+    freeze_encoder: false
+    
+    optimizer:
+      type: "adamw"
+      weight_decay: 1.0e-4
+      
+    scheduler:
+      type: "cosine"
+      warmup_epochs: 5
+      min_lr: 1.0e-7
+
+# ============== 分布式训练 ==============
+distributed:
+  enabled: false
+  backend: "nccl"
+  strategy: "ddp"  # 选项: ddp, fsdp
+
+# ============== 硬件 ==============
+hardware:
+  num_workers: 4
+  pin_memory: true
+  device: "cuda"

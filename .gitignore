@@ -1,0 +1,68 @@
+# ============== Data ==============
+data/raw/
+data/processed/
+*.wav
+*.npy
+*.pt
+*.h5
+*.hdf5
+
+# ============== Model Checkpoints ==============
+checkpoints/
+*.ckpt
+*.pth
+*.bin
+
+# ============== Logs ==============
+logs/
+wandb/
+runs/
+*.log
+
+# ============== Python ==============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============== Virtual Environment ==============
+venv/
+ENV/
+env/
+.venv/
+
+# ============== IDE ==============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============== Jupyter ==============
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ============== OS ==============
+.DS_Store
+Thumbs.db
+
+# ============== Misc ==============
+*.bak
+*.tmp
+.cache/

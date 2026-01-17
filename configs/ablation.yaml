@@ -1,0 +1,160 @@
+# PA-HCL 消融研究配置
+# =====================================
+# 系统性消融实验的配置
+
+experiment:
+  name: "pahcl_ablation"
+  description: "PA-HCL 消融研究实验"
+
+# 基础数据设置
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  sample_rate: 5000
+  segment_duration: 1.0
+  num_substructures: 4
+
+# 基础模型设置 (PA-HCL 默认)
+model:
+  encoder_type: "cnn_mamba"  # 选项: cnn_only, cnn_transformer, cnn_mamba
+  
+  # CNN 主干网络
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]
+  
+  # Mamba (SSM) 设置
+  mamba_d_model: 256
+  mamba_n_layers: 4
+  mamba_d_state: 16
+  mamba_expand: 2
+  
+  # Transformer 设置 (针对 cnn_transformer 变体)
+  transformer_n_heads: 8
+  transformer_n_layers: 4
+  transformer_ff_dim: 1024
+  
+  # 投影头
+  projection_dim: 128
+
+# 基础损失设置
+loss:
+  temperature: 0.07
+  lambda_cycle: 1.0      # 周期级对比的权重
+  lambda_sub: 0.5        # 子结构级对比的权重
+
+# 基础训练设置
+training:
+  pretrain_epochs: 100
+  finetune_epochs: 50
+  batch_size: 64
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  warmup_epochs: 10
+  use_amp: true
+  num_workers: 4
+
+# 基础增强设置
+augmentation:
+  enable: true
+  noise:
+    enable: true
+    snr_range: [15, 30]
+  time_warp:
+    enable: true
+    max_ratio: 0.2
+  freq_mask:
+    enable: true
+    max_width: 20
+    num_masks: 2
+  amplitude_scale:
+    enable: true
+    range: [0.8, 1.2]
+
+# 下游任务设置
+downstream:
+  num_classes: 5
+  hidden_dim: 128
+  dropout: 0.3
+  learning_rate: 1e-4
+
+# 消融实验定义
+ablation:
+  # 编码器架构消融
+  encoder:
+    variants:
+      - name: "cnn_only"
+        description: "仅 CNN 主干 (无序列建模)"
+        overrides:
+          model.encoder_type: "cnn_only"
+      
+      - name: "cnn_transformer"
+        description: "CNN + Transformer 用于序列建模"
+        overrides:
+          model.encoder_type: "cnn_transformer"
+      
+      - name: "cnn_mamba"
+        description: "CNN + Mamba (SSM) 用于序列建模 (PA-HCL 默认)"
+        overrides:
+          model.encoder_type: "cnn_mamba"
+  
+  # 损失组件消融
+  loss_components:
+    variants:
+      - name: "cycle_only"
+        description: "仅周期级对比损失"
+        overrides:
+          loss.lambda_cycle: 1.0
+          loss.lambda_sub: 0.0
+      
+      - name: "sub_only"
+        description: "仅子结构级对比损失"
+        overrides:
+          loss.lambda_cycle: 0.0
+          loss.lambda_sub: 1.0
+      
+      - name: "hierarchical"
+        description: "分层对比损失 (PA-HCL 默认)"
+        overrides:
+          loss.lambda_cycle: 1.0
+          loss.lambda_sub: 0.5
+  
+  # 子结构数量消融
+  substructures:
+    variants:
+      - name: "k2"
+        description: "2 个子结构 (S1-S2, 收缩期-舒张期)"
+        overrides:
+          data.num_substructures: 2
+      
+      - name: "k4"
+        description: "4 个子结构 (S1, 收缩期, S2, 舒张期)"
+        overrides:
+          data.num_substructures: 4
+      
+      - name: "k8"
+        description: "8 个子结构 (更精细的分割)"
+        overrides:
+          data.num_substructures: 8
+  
+  # 温度消融
+  temperature:
+    variants:
+      - name: "t_0.01"
+        overrides:
+          loss.temperature: 0.01
+      - name: "t_0.05"
+        overrides:
+          loss.temperature: 0.05
+      - name: "t_0.07"
+        overrides:
+          loss.temperature: 0.07
+      - name: "t_0.1"
+        overrides:
+          loss.temperature: 0.1
+      - name: "t_0.5"
+        overrides:
+          loss.temperature: 0.5
+
+# 可复现性
+seed: 42
