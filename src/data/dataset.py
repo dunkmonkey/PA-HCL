@@ -57,6 +57,7 @@ class PCGPretrainDataset(Dataset):
     def __init__(
         self,
         data_dir: Union[str, Path],
+        split: Optional[str] = None,
         sample_rate: int = 5000,
         num_substructures: int = 4,
         target_length: int = 4000,
@@ -69,6 +70,7 @@ class PCGPretrainDataset(Dataset):
         
         参数:
             data_dir: 处理后数据目录的路径
+            split: 数据划分标识（可选，当前实现不会据此过滤数据）
             sample_rate: 音频的采样率
             num_substructures: 子结构片段数量 (K)
             target_length: 每个周期的目标长度（样本数）
@@ -77,6 +79,7 @@ class PCGPretrainDataset(Dataset):
             cache_in_memory: 是否将所有数据缓存在内存中（更快但占用更多 RAM）
         """
         self.data_dir = Path(data_dir)
+        self.split = split
         self.sample_rate = sample_rate
         self.num_substructures = num_substructures
         self.target_length = target_length
@@ -275,6 +278,7 @@ class PCGDownstreamDataset(Dataset):
         target_length: int = 4000,
         transform: Optional[Compose] = None,
         mode: str = "train",
+        split: Optional[str] = None,
         label_map: Optional[Dict[str, int]] = None
     ):
         """
@@ -287,11 +291,14 @@ class PCGDownstreamDataset(Dataset):
             target_length: 目标信号长度（样本数）
             transform: 增强管道
             mode: "train", "val", 或 "test"
+            split: 数据划分别名（可选，等价于 mode）
             label_map: 从标签字符串到整数的映射
         """
         self.data_dir = Path(data_dir)
         self.sample_rate = sample_rate
         self.target_length = target_length
+        if split is not None:
+            mode = split
         self.mode = mode
         
         # Set up transforms
@@ -554,66 +561,105 @@ def create_subject_wise_split(
 
 def create_dataloaders(
     dataset: Dataset,
-    train_indices: List[int],
-    val_indices: List[int],
+    train_indices: Optional[List[int]] = None,
+    val_indices: Optional[List[int]] = None,
     test_indices: Optional[List[int]] = None,
     batch_size: int = 64,
     num_workers: int = 4,
     collate_fn: Optional[Callable] = None,
-    pin_memory: bool = True
-) -> Tuple[DataLoader, DataLoader, Optional[DataLoader]]:
+    pin_memory: bool = True,
+    shuffle: bool = True,
+    distributed: bool = False,
+    drop_last: Optional[bool] = None
+) -> Union[DataLoader, Tuple[DataLoader, DataLoader, Optional[DataLoader]]]:
     """
-    从索引划分创建 DataLoaders。
+    创建 DataLoader（支持单数据集或按索引划分）。
+    
+    用法:
+        - 仅传入 dataset：返回单个 DataLoader
+        - 传入 train/val(/test) 索引：返回 (train_loader, val_loader, test_loader)
     
     参数:
-        dataset: 完整数据集
-        train_indices: 训练索引
-        val_indices: 验证索引
+        dataset: 完整数据集或已划分的数据集
+        train_indices: 训练索引（可选）
+        val_indices: 验证索引（可选）
         test_indices: 测试索引（可选）
         batch_size: 批次大小
         num_workers: 数据加载工作进程数
         collate_fn: 自定义整理函数
         pin_memory: 是否锁定内存（更快的 GPU 传输）
+        shuffle: 是否打乱（单数据集模式生效）
+        distributed: 是否使用分布式采样器
+        drop_last: 是否丢弃不足一个 batch 的样本（若为 None，则按 shuffle 决定）
         
     返回:
-        (train_loader, val_loader, test_loader) 的元组
+        DataLoader 或 (train_loader, val_loader, test_loader)
     """
     from torch.utils.data import Subset
+    from torch.utils.data.distributed import DistributedSampler
     
-    train_dataset = Subset(dataset, train_indices)
-    val_dataset = Subset(dataset, val_indices)
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=pin_memory,
-        drop_last=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=pin_memory,
-        drop_last=False
-    )
-    
-    test_loader = None
-    if test_indices is not None:
-        test_dataset = Subset(dataset, test_indices)
-        test_loader = DataLoader(
-            test_dataset,
+    # 索引划分模式
+    if train_indices is not None or val_indices is not None:
+        if train_indices is None or val_indices is None:
+            raise ValueError("train_indices 和 val_indices 需同时提供")
+        
+        train_dataset = Subset(dataset, train_indices)
+        val_dataset = Subset(dataset, val_indices)
+        
+        train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=False if train_sampler is not None else True,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=True
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
             batch_size=batch_size,
             shuffle=False,
+            sampler=val_sampler,
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
             drop_last=False
         )
+        
+        test_loader = None
+        if test_indices is not None:
+            test_dataset = Subset(dataset, test_indices)
+            test_sampler = DistributedSampler(test_dataset, shuffle=False) if distributed else None
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                sampler=test_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                pin_memory=pin_memory,
+                drop_last=False
+            )
+        
+        return train_loader, val_loader, test_loader
     
-    return train_loader, val_loader, test_loader
+    # 单数据集模式
+    if drop_last is None:
+        drop_last = shuffle
+    
+    sampler = DistributedSampler(dataset, shuffle=shuffle) if distributed else None
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False if sampler is not None else shuffle,
+        sampler=sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        drop_last=drop_last
+    )
