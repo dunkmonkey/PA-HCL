@@ -26,6 +26,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.tensorboard import SummaryWriter
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -144,6 +145,9 @@ class PretrainTrainer:
             name="PretrainTrainer",
             log_file=self.output_dir / "train.log"
         )
+        
+        # Set up TensorBoard
+        self.writer = SummaryWriter(log_dir=str(self.output_dir)) if self.is_main_process else None
         
         # Device setup
         if distributed:
@@ -322,6 +326,10 @@ class PretrainTrainer:
         # Save final model
         if self.is_main_process:
             self.save_checkpoint("final_model.pt")
+        
+        # Close TensorBoard writer
+        if self.writer is not None:
+            self.writer.close()
         
         return train_metrics
     
@@ -510,6 +518,14 @@ class PretrainTrainer:
                 f"(cycle: {val_metrics['val_loss_cycle']:.4f}, "
                 f"sub: {val_metrics['val_loss_sub']:.4f})"
             )
+        
+        # TensorBoard logging
+        if self.writer is not None:
+            for k, v in train_metrics.items():
+                self.writer.add_scalar(f"train/{k}", v, self.current_epoch + 1)
+            for k, v in val_metrics.items():
+                self.writer.add_scalar(f"val/{k}", v, self.current_epoch + 1)
+            self.writer.add_scalar("learning_rate", self.optimizer.param_groups[0]['lr'], self.current_epoch + 1)
         
         # W&B logging
         if self.use_wandb:

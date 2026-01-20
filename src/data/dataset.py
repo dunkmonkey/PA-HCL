@@ -4,11 +4,19 @@ PA-HCL 预训练和下游任务的数据集类。
 此模块提供：
 - PCGPretrainDataset: 用于带有分层视图的自监督预训练
 - PCGDownstreamDataset: 用于监督微调和评估
+- 任务感知数据加载工具
 - 数据整理工具
+
+支持的下游任务：
+- CirCor 杂音检测三分类 (circor_murmur)
+- CirCor 临床结果二分类 (circor_outcome)
+- PhysioNet 2016 心音二分类 (physionet2016)
+- PASCAL 心音三分类 (pascal)
 
 作者: PA-HCL 团队
 """
 
+import csv
 import json
 import random
 from pathlib import Path
@@ -16,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 
 from .preprocessing import (
     load_audio,
@@ -244,18 +252,23 @@ class PCGDownstreamDataset(Dataset):
     
     支持:
     - 二分类（正常 vs 异常）
-    - 多分类
+    - 多分类（杂音检测、PASCAL分类等）
     - 异常检测（仅使用正常样本进行训练）
+    - 任务感知加载（从任务配置自动加载）
     
     数据组织:
         数据目录应具有以下结构:
         
-        选项 1 (基于文件的标签):
-            data/
-            ├── subject_0001/
-            │   ├── rec_01.wav
-            │   └── ...
-            └── labels.csv  # 列: file_path, label
+        选项 1 (基于CSV的标签 - 推荐):
+            data/downstream/circor_murmur/
+            ├── train/
+            │   └── subject_xxx/rec_xx/cycle_xxx.npy
+            ├── val/
+            ├── test/
+            ├── train.csv
+            ├── val.csv
+            ├── test.csv
+            └── task_config.json
         
         选项 2 (基于目录的标签):
             data/
@@ -270,29 +283,49 @@ class PCGDownstreamDataset(Dataset):
     def __init__(
         self,
         data_dir: Union[str, Path],
-        labels_file: Optional[Union[str, Path]] = None,
+        csv_path: Optional[Union[str, Path]] = None,
         sample_rate: int = 5000,
         target_length: int = 4000,
         transform: Optional[Compose] = None,
         mode: str = "train",
-        label_map: Optional[Dict[str, int]] = None
+        label_map: Optional[Dict[str, int]] = None,
+        task_config: Optional[Dict] = None,
+        # 兼容旧参数名
+        labels_file: Optional[Union[str, Path]] = None
     ):
         """
         初始化下游数据集。
         
         参数:
             data_dir: 数据目录的路径
-            labels_file: 带有标签的 CSV 文件路径（可选）
+            csv_path: 标签CSV文件路径（推荐使用此参数）
             sample_rate: 目标采样率
             target_length: 目标信号长度（样本数）
             transform: 增强管道
             mode: "train", "val", 或 "test"
             label_map: 从标签字符串到整数的映射
+            task_config: 任务配置字典（从 task_config.json 加载）
+            labels_file: 兼容旧参数名，等同于 csv_path
         """
         self.data_dir = Path(data_dir)
         self.sample_rate = sample_rate
         self.target_length = target_length
         self.mode = mode
+        self._class_weights = None
+        self.task_config = task_config
+        
+        # 兼容旧参数名
+        if csv_path is None and labels_file is not None:
+            csv_path = labels_file
+        
+        # 从任务配置加载设置
+        if task_config is not None:
+            if label_map is None and "label_map" in task_config:
+                label_map = task_config["label_map"]
+            if "class_weights" in task_config:
+                self._class_weights = torch.tensor(
+                    task_config["class_weights"], dtype=torch.float32
+                )
         
         # Set up transforms
         if transform is not None:
@@ -303,7 +336,11 @@ class PCGDownstreamDataset(Dataset):
             self.transform = get_eval_transforms()
         
         # Load data and labels
-        self.samples = self._load_samples(labels_file)
+        self.samples, csv_class_weights = self._load_samples(csv_path)
+        
+        # 优先使用CSV中的类别权重
+        if csv_class_weights is not None and self._class_weights is None:
+            self._class_weights = torch.tensor(csv_class_weights, dtype=torch.float32)
         
         # Set up label mapping
         if label_map is not None:
@@ -311,51 +348,90 @@ class PCGDownstreamDataset(Dataset):
         else:
             self.label_map = self._create_label_map()
         
+        # 创建反向映射 (int -> str)
+        self.reverse_label_map = {v: k for k, v in self.label_map.items()}
+        
         self.num_classes = len(self.label_map)
     
     def _load_samples(
         self,
-        labels_file: Optional[Path]
-    ) -> List[Tuple[Path, str]]:
+        csv_path: Optional[Union[str, Path]]
+    ) -> Tuple[List[Tuple[Path, str, Optional[str]]], Optional[List[float]]]:
         """
         加载样本路径和标签。
         
         参数:
-            labels_file: 标签 CSV 的路径
+            csv_path: 标签 CSV 的路径
             
         返回:
-            (file_path, label) 元组的列表
+            ((file_path, label, subject_id) 元组的列表, 类别权重)
         """
         samples = []
+        class_weights = None
         
-        if labels_file is not None:
-            # Load from CSV
-            import csv
-            labels_file = Path(labels_file)
-            with open(labels_file, 'r') as f:
-                reader = csv.DictReader(f)
+        if csv_path is not None:
+            # Load from CSV (新格式)
+            csv_path = Path(csv_path)
+            with open(csv_path, 'r') as f:
+                lines = f.readlines()
+            
+            # 解析注释行中的类别权重
+            data_lines = []
+            for line in lines:
+                line = line.strip()
+                if line.startswith('# class_weights:'):
+                    # 解析类别权重: # class_weights: [1.0, 2.0, 3.0]
+                    try:
+                        weights_str = line.split(':', 1)[1].strip()
+                        class_weights = json.loads(weights_str)
+                    except (json.JSONDecodeError, IndexError):
+                        pass
+                elif line and not line.startswith('#'):
+                    data_lines.append(line)
+            
+            # 解析 CSV 数据
+            if data_lines:
+                import io
+                reader = csv.DictReader(io.StringIO('\n'.join(data_lines)))
                 for row in reader:
-                    file_path = self.data_dir / row['file_path']
-                    if file_path.exists():
-                        samples.append((file_path, row['label']))
+                    # 支持多种列名格式
+                    file_path_str = row.get('file_path', row.get('path', ''))
+                    
+                    # 尝试不同的标签列名
+                    label = row.get('label_name', row.get('label', ''))
+                    if label.isdigit():
+                        # 如果 label 是数字，尝试获取 label_name
+                        label = row.get('label_name', label)
+                    
+                    subject_id = row.get('subject_id', '')
+                    
+                    # 构建完整路径
+                    file_path = self.data_dir / file_path_str
+                    if not file_path.exists():
+                        # 尝试其他路径组合
+                        file_path = Path(file_path_str)
+                        if not file_path.exists():
+                            continue
+                    
+                    samples.append((file_path, str(label), subject_id))
         else:
             # Try directory-based organization
             for label_dir in self.data_dir.iterdir():
                 if label_dir.is_dir():
                     label = label_dir.name
                     for file_path in label_dir.glob("*.wav"):
-                        samples.append((file_path, label))
+                        samples.append((file_path, label, ""))
                     for file_path in label_dir.glob("*.npy"):
-                        samples.append((file_path, label))
+                        samples.append((file_path, label, ""))
         
         if len(samples) == 0:
             raise ValueError(f"No samples found in {self.data_dir}")
         
-        return samples
+        return samples, class_weights
     
     def _create_label_map(self) -> Dict[str, int]:
         """创建从标签字符串到整数的映射。"""
-        unique_labels = sorted(set(label for _, label in self.samples))
+        unique_labels = sorted(set(label for _, label, *_ in self.samples))
         return {label: idx for idx, label in enumerate(unique_labels)}
     
     def _load_signal(self, file_path: Path) -> np.ndarray:
@@ -403,7 +479,10 @@ class PCGDownstreamDataset(Dataset):
             - label: 类标签 (整数)
             - idx: 样本索引
         """
-        file_path, label_str = self.samples[idx]
+        sample = self.samples[idx]
+        file_path = sample[0]
+        label_str = sample[1]
+        subject_id = sample[2] if len(sample) > 2 else ""
         
         # Load signal
         signal = self._load_signal(file_path)
@@ -419,19 +498,53 @@ class PCGDownstreamDataset(Dataset):
         return {
             "signal": signal_tensor,
             "label": label_tensor,
-            "idx": idx
+            "idx": idx,
+            "subject_id": subject_id
         }
+    
+    def get_subject_id(self, idx: int) -> str:
+        """
+        获取给定样本索引的受试者 ID。
+        
+        用于按受试者划分数据。
+        
+        参数:
+            idx: 样本索引
+            
+        返回:
+            受试者 ID 字符串
+        """
+        sample = self.samples[idx]
+        if len(sample) > 2 and sample[2]:
+            return sample[2]
+        
+        # 从文件路径推断
+        file_path = sample[0]
+        parts = file_path.parts
+        for part in parts:
+            if part.startswith('subject_'):
+                return part.replace('subject_', '')
+        
+        return "unknown"
     
     def get_class_weights(self) -> torch.Tensor:
         """
-        计算不平衡数据集的类别权重。
+        获取类别权重（用于处理不平衡数据）。
+        
+        优先返回从配置/CSV加载的权重，否则动态计算。
         
         返回:
             类别权重张量
         """
+        # 优先使用预加载的权重
+        if self._class_weights is not None:
+            return self._class_weights
+        
+        # 动态计算
         label_counts = {}
-        for _, label in self.samples:
-            label_idx = self.label_map[label]
+        for sample in self.samples:
+            label_str = sample[1]
+            label_idx = self.label_map[label_str]
             label_counts[label_idx] = label_counts.get(label_idx, 0) + 1
         
         total = len(self.samples)
@@ -441,6 +554,73 @@ class PCGDownstreamDataset(Dataset):
             weights.append(total / (self.num_classes * count))
         
         return torch.tensor(weights, dtype=torch.float32)
+    
+    def get_label_distribution(self) -> Dict[str, int]:
+        """
+        获取标签分布统计。
+        
+        返回:
+            {标签名: 数量} 的字典
+        """
+        distribution = {}
+        for sample in self.samples:
+            label_str = sample[1]
+            distribution[label_str] = distribution.get(label_str, 0) + 1
+        return distribution
+    
+    @classmethod
+    def from_task(
+        cls,
+        task_name: str,
+        split: str,
+        base_dir: Union[str, Path] = "data/downstream",
+        **kwargs
+    ) -> "PCGDownstreamDataset":
+        """
+        从任务名称创建数据集（便捷方法）。
+        
+        自动加载任务配置和对应的CSV文件。
+        
+        参数:
+            task_name: 任务名称（如 'circor_murmur', 'physionet2016'）
+            split: 数据划分（'train', 'val', 'test'）
+            base_dir: 下游数据根目录
+            **kwargs: 传递给构造函数的其他参数
+            
+        返回:
+            PCGDownstreamDataset 实例
+            
+        示例:
+            >>> dataset = PCGDownstreamDataset.from_task('circor_murmur', 'train')
+        """
+        base_dir = Path(base_dir)
+        task_dir = base_dir / task_name
+        
+        # 加载任务配置
+        config_path = task_dir / "task_config.json"
+        task_config = None
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                task_config = json.load(f)
+        
+        # 构建 CSV 路径
+        csv_path = task_dir / f"{split}.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"找不到 CSV 文件: {csv_path}")
+        
+        # 数据目录是任务目录
+        data_dir = task_dir
+        
+        # 设置 mode
+        mode = "train" if split == "train" else "eval"
+        
+        return cls(
+            data_dir=data_dir,
+            csv_path=csv_path,
+            mode=mode,
+            task_config=task_config,
+            **kwargs
+        )
 
 
 # ============== Data Collation ==============
@@ -617,3 +797,125 @@ def create_dataloaders(
         )
     
     return train_loader, val_loader, test_loader
+
+
+# ============== Task-Aware Data Loading ==============
+
+def create_task_dataloaders(
+    task_name: str,
+    base_dir: Union[str, Path] = "data/downstream",
+    batch_size: int = 32,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    **dataset_kwargs
+) -> Dict[str, DataLoader]:
+    """
+    为指定任务创建所有数据加载器。
+    
+    这是推荐的数据加载方式，自动处理:
+    - 任务配置加载
+    - CSV 文件解析
+    - 类别权重计算
+    
+    参数:
+        task_name: 任务名称 ('circor_murmur', 'circor_outcome', 'physionet2016', 'pascal')
+        base_dir: 下游数据根目录
+        batch_size: 批次大小
+        num_workers: 数据加载工作进程数
+        pin_memory: 是否锁定内存
+        **dataset_kwargs: 传递给 PCGDownstreamDataset 的额外参数
+        
+    返回:
+        包含 'train', 'val', 'test' DataLoader 的字典，
+        以及 'class_weights', 'num_classes', 'label_map' 等元信息
+        
+    示例:
+        >>> loaders = create_task_dataloaders('circor_murmur', batch_size=32)
+        >>> train_loader = loaders['train']
+        >>> class_weights = loaders['class_weights']
+    """
+    base_dir = Path(base_dir)
+    task_dir = base_dir / task_name
+    
+    if not task_dir.exists():
+        raise FileNotFoundError(f"任务目录不存在: {task_dir}")
+    
+    # 加载任务配置
+    config_path = task_dir / "task_config.json"
+    task_config = None
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            task_config = json.load(f)
+    
+    result = {
+        'task_name': task_name,
+        'task_config': task_config,
+    }
+    
+    # 创建各个 split 的数据集和加载器
+    for split in ['train', 'val', 'test']:
+        csv_path = task_dir / f"{split}.csv"
+        
+        if not csv_path.exists():
+            result[split] = None
+            continue
+        
+        # 设置 mode
+        mode = "train" if split == "train" else "eval"
+        
+        # 创建数据集
+        dataset = PCGDownstreamDataset(
+            data_dir=task_dir,
+            csv_path=csv_path,
+            mode=mode,
+            task_config=task_config,
+            **dataset_kwargs
+        )
+        
+        # 创建数据加载器
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=(split == "train"),
+            num_workers=num_workers,
+            collate_fn=downstream_collate_fn,
+            pin_memory=pin_memory,
+            drop_last=(split == "train")
+        )
+        
+        result[split] = loader
+        
+        # 从训练集获取元信息
+        if split == 'train':
+            result['class_weights'] = dataset.get_class_weights()
+            result['num_classes'] = dataset.num_classes
+            result['label_map'] = dataset.label_map
+            result['label_distribution'] = dataset.get_label_distribution()
+    
+    return result
+
+
+def get_available_tasks(base_dir: Union[str, Path] = "data/downstream") -> List[str]:
+    """
+    获取所有可用的下游任务列表。
+    
+    参数:
+        base_dir: 下游数据根目录
+        
+    返回:
+        任务名称列表
+    """
+    base_dir = Path(base_dir)
+    tasks = []
+    
+    if not base_dir.exists():
+        return tasks
+    
+    for task_dir in base_dir.iterdir():
+        if task_dir.is_dir():
+            config_path = task_dir / "task_config.json"
+            train_csv = task_dir / "train.csv"
+            if config_path.exists() or train_csv.exists():
+                tasks.append(task_dir.name)
+    
+    return sorted(tasks)

@@ -1,0 +1,95 @@
+# PA-HCL 下游任务配置
+# ==================================
+# CirCor 杂音检测三分类任务
+# 数据集: PhysioNet/CinC 2022 Challenge
+# 任务: Murmur Detection (Present / Absent / Unknown)
+
+task:
+  name: "circor_murmur"
+  type: "classification"
+  dataset: "circor"
+  description: "CirCor 杂音检测三分类任务"
+
+# 数据设置
+data:
+  base_dir: "data/downstream"
+  task_name: "circor_murmur"
+  sample_rate: 5000
+  target_length: 4000  # 0.8秒
+
+# 分类设置
+classification:
+  num_classes: 3
+  label_map:
+    Present: 0
+    Absent: 1
+    Unknown: 2
+  # 类别权重由数据准备脚本自动计算并保存到 task_config.json
+
+# 模型设置 (应与预训练一致)
+model:
+  encoder_type: "cnn_mamba"
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]
+  mamba_d_model: 256
+  mamba_n_layers: 4
+
+# 分类器设置
+classifier:
+  hidden_dim: 128       # 分类器隐藏层维度，设为 null 使用线性分类器
+  dropout: 0.3
+
+# 训练设置
+training:
+  # 基础参数
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 1e-3
+  weight_decay: 1e-4
+  
+  # 学习率调度
+  warmup_epochs: 5
+  min_lr: 1e-7
+  
+  # 编码器学习率缩放 (相对于分类器)
+  encoder_lr_scale: 0.1
+  
+  # 正则化
+  label_smoothing: 0.1
+  use_class_weights: true  # 使用类别权重处理不平衡
+  
+  # 早停
+  early_stopping_patience: 15
+  
+  # 梯度
+  grad_clip_norm: 1.0
+  
+  # 混合精度
+  use_amp: true
+  
+  # 日志
+  log_interval: 20
+  save_interval: 10
+
+# 预训练检查点
+pretrain:
+  checkpoint_path: "checkpoints/pretrain/best_model.pt"
+  load_encoder_only: true
+  freeze_encoder: false  # false = 全量微调, true = 线性评估
+
+# 评估设置
+evaluation:
+  primary_metric: "f1_macro"  # 用于早停和模型选择的主要指标
+  metrics:
+    - accuracy
+    - f1_macro
+    - f1_weighted
+    - auroc
+    - precision_macro
+    - recall_macro
+  save_confusion_matrix: true
+  save_predictions: true
+
+# 可复现性
+seed: 42

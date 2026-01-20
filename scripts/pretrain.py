@@ -20,6 +20,7 @@ PA-HCL 预训练脚本。
 import argparse
 import os
 import sys
+import yaml
 from pathlib import Path
 
 # 将项目根目录添加到路径
@@ -233,6 +234,15 @@ def main():
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(f"Model parameters: {total_params:,} (trainable: {trainable_params:,})")
+    
+    # 保存配置文件
+    if is_main:
+        output_path = Path(args.output_dir) / args.experiment_name
+        output_path.mkdir(parents=True, exist_ok=True)
+        config_save_path = output_path / 'config.yaml'
+        with open(config_save_path, 'w', encoding='utf-8') as f:
+            yaml.dump(config.to_dict() if hasattr(config, 'to_dict') else dict(config), f, default_flow_style=False, allow_unicode=True)
+        logger.info(f"Configuration saved to {config_save_path}")
     
     # 创建训练器
     from src.trainers.pretrain_trainer import PretrainTrainer

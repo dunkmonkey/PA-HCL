@@ -1,17 +1,30 @@
 # PA-HCL 微调配置
 # ==================================
-# 下游分类任务的配置
+# 下游分类任务的默认配置
+# 
+# 用法:
+#   1. 直接使用任务配置 (推荐):
+#      python scripts/finetune.py --task circor_murmur --pretrained ...
+#   
+#   2. 使用此默认配置 (需要手动指定数据路径):
+#      python scripts/finetune.py --config configs/finetune.yaml --pretrained ...
 
 experiment:
   name: "pahcl_finetune"
   description: "PA-HCL 下游微调"
 
-# 数据设置 (继承自预训练)
+# 任务设置 (被 --task 参数覆盖)
+task:
+  name: "default"
+  type: "classification"
+
+# 数据设置
 data:
-  raw_dir: "data/raw"
-  processed_dir: "data/processed"
+  base_dir: "data/downstream"     # 下游任务数据根目录
+  raw_dir: "data/raw"             # 原始数据目录
+  processed_dir: "data/processed" # 预处理数据目录
   sample_rate: 5000
-  segment_duration: 1.0
+  target_length: 4000
   num_substructures: 4
 
 # 模型 (应与预训练模型匹配)
@@ -23,40 +36,63 @@ model:
   mamba_d_model: 256
   mamba_n_layers: 4
 
-# 下游任务设置
-downstream:
-  # 分类
-  num_classes: 5  # 正常, MVP, MS, MR, AS (示例)
-  label_map:
-    normal: 0
-    mvp: 1
-    ms: 2
-    mr: 3
-    as: 4
-  
-  # 分类器架构
+# 分类器设置
+classifier:
   hidden_dim: 128  # 设为 null 以使用线性分类器
   dropout: 0.3
-  
-  # 训练
-  num_epochs: 50
+
+# 下游任务默认设置 (向后兼容)
+downstream:
+  num_classes: 2
+  label_map:
+    normal: 0
+    abnormal: 1
+  hidden_dim: 128
+  dropout: 0.3
+  num_epochs: 100
   batch_size: 32
-  learning_rate: 1e-4
+  learning_rate: 1e-3
   weight_decay: 1e-4
   warmup_epochs: 5
-  
-  # 早停
-  early_stopping_patience: 10
-  
-  # 损失
+  early_stopping_patience: 15
   label_smoothing: 0.1
+  use_class_weights: true
 
 # 训练设置
 training:
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 1e-3
+  weight_decay: 1e-4
+  warmup_epochs: 5
+  min_lr: 1e-7
+  encoder_lr_scale: 0.1
+  label_smoothing: 0.1
+  use_class_weights: true
+  early_stopping_patience: 15
+  grad_clip_norm: 1.0
   num_workers: 4
   use_amp: true
   log_interval: 20
-  save_interval: 5
+  save_interval: 10
+
+# 预训练检查点
+pretrain:
+  checkpoint_path: "checkpoints/pretrain/best_model.pt"
+  load_encoder_only: true
+  freeze_encoder: false
+
+# 评估设置
+evaluation:
+  primary_metric: "f1_macro"  # 主要评估指标
+  metrics:
+    - accuracy
+    - f1
+    - f1_macro
+    - auroc
+    - precision
+    - recall
+  save_confusion_matrix: true
 
 # 可复现性
 seed: 42

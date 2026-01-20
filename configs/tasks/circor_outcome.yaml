@@ -1,0 +1,78 @@
+# PA-HCL 下游任务配置
+# ==================================
+# CirCor 临床结果二分类任务
+# 数据集: PhysioNet/CinC 2022 Challenge
+# 任务: Clinical Outcome (Normal / Abnormal)
+
+task:
+  name: "circor_outcome"
+  type: "classification"
+  dataset: "circor"
+  description: "CirCor 临床结果二分类任务"
+
+# 数据设置
+data:
+  base_dir: "data/downstream"
+  task_name: "circor_outcome"
+  sample_rate: 5000
+  target_length: 4000
+
+# 分类设置
+classification:
+  num_classes: 2
+  label_map:
+    Normal: 0
+    Abnormal: 1
+
+# 模型设置 (应与预训练一致)
+model:
+  encoder_type: "cnn_mamba"
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]
+  mamba_d_model: 256
+  mamba_n_layers: 4
+
+# 分类器设置
+classifier:
+  hidden_dim: 128
+  dropout: 0.3
+
+# 训练设置
+training:
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 1e-3
+  weight_decay: 1e-4
+  warmup_epochs: 5
+  min_lr: 1e-7
+  encoder_lr_scale: 0.1
+  label_smoothing: 0.1
+  use_class_weights: true
+  early_stopping_patience: 15
+  grad_clip_norm: 1.0
+  use_amp: true
+  log_interval: 20
+  save_interval: 10
+
+# 预训练检查点
+pretrain:
+  checkpoint_path: "checkpoints/pretrain/best_model.pt"
+  load_encoder_only: true
+  freeze_encoder: false
+
+# 评估设置
+evaluation:
+  primary_metric: "auroc"  # 二分类推荐使用 AUROC
+  metrics:
+    - accuracy
+    - auroc
+    - auprc
+    - f1
+    - sensitivity
+    - specificity
+  save_confusion_matrix: true
+  save_predictions: true
+
+# 可复现性
+seed: 42

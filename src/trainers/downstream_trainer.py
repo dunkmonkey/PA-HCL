@@ -123,6 +123,7 @@ class DownstreamTrainer:
     - 线性评估（冻结编码器）
     - 全量微调
     - 小样本学习
+    - 多任务支持
     """
     
     def __init__(
@@ -155,6 +156,9 @@ class DownstreamTrainer:
         experiment_name: str = "downstream",
         # Reproducibility
         seed: int = 42,
+        # Task-specific settings
+        task_name: str = "default",
+        primary_metric: str = "f1",
     ):
         """
         初始化下游训练器。
@@ -175,6 +179,8 @@ class DownstreamTrainer:
         self.save_interval = save_interval
         self.experiment_name = experiment_name
         self.seed = seed
+        self.task_name = task_name
+        self.primary_metric = primary_metric
         
         # Output directory
         self.output_dir = Path(output_dir) / experiment_name
@@ -237,7 +243,13 @@ class DownstreamTrainer:
         self.patience_counter = 0
         
         self.logger.info(f"Downstream trainer initialized. Device: {self.device}")
+        self.logger.info(f"Task: {self.task_name}")
+        self.logger.info(f"Primary metric: {self.primary_metric}")
         self.logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        
+        # 打印类别权重
+        if class_weights is not None:
+            self.logger.info(f"Class weights: {class_weights.tolist()}")
     
     @property
     def is_main_process(self) -> bool:
@@ -286,18 +298,21 @@ class DownstreamTrainer:
             if self.is_main_process:
                 self._log_epoch(train_metrics, val_metrics)
                 
-                # Early stopping check
+                # Early stopping check - use primary metric
                 if val_metrics:
-                    val_f1 = val_metrics.get("val_f1", val_metrics.get("val_accuracy", 0))
-                    if val_f1 > self.best_val_metric:
-                        self.best_val_metric = val_f1
+                    # 获取主要指标值
+                    val_metric = self._get_primary_metric_value(val_metrics)
+                    
+                    if val_metric > self.best_val_metric:
+                        self.best_val_metric = val_metric
                         self.patience_counter = 0
                         self.save_checkpoint("best_model.pt")
+                        self.logger.info(f"★ 新的最佳模型! {self.primary_metric}: {val_metric:.4f}")
                     else:
                         self.patience_counter += 1
                     
                     if self.patience_counter >= self.early_stopping_patience:
-                        self.logger.info(f"Early stopping at epoch {epoch+1}")
+                        self.logger.info(f"早停于 epoch {epoch+1}（{self.primary_metric} 无改善）")
                         break
                 
                 # Periodic checkpoint
@@ -427,19 +442,65 @@ class DownstreamTrainer:
         val_metrics: Dict[str, float]
     ):
         """记录 epoch 结果。"""
-        self.logger.info(
+        # 基本训练指标
+        log_str = (
             f"Epoch [{self.current_epoch+1}/{self.num_epochs}] "
             f"Train Loss: {train_metrics['train_loss']:.4f} "
             f"Acc: {train_metrics.get('accuracy', 0):.4f} "
             f"F1: {train_metrics.get('f1', 0):.4f}"
         )
+        self.logger.info(log_str)
         
         if val_metrics:
+            val_metric = self._get_primary_metric_value(val_metrics)
             self.logger.info(
-                f"Val Loss: {val_metrics.get('val_loss', 0):.4f} "
+                f"  Val Loss: {val_metrics.get('val_loss', 0):.4f} "
                 f"Acc: {val_metrics.get('val_accuracy', 0):.4f} "
-                f"F1: {val_metrics.get('val_f1', 0):.4f}"
+                f"F1: {val_metrics.get('val_f1', 0):.4f} "
+                f"[{self.primary_metric}: {val_metric:.4f}]"
             )
+    
+    def _get_primary_metric_value(self, metrics: Dict[str, float]) -> float:
+        """
+        从指标字典中获取主要指标的值。
+        
+        支持的指标名称:
+        - accuracy, acc
+        - f1, f1_macro, f1_weighted
+        - auroc, auc, roc_auc
+        - auprc, ap, average_precision
+        - precision, precision_macro
+        - recall, recall_macro, sensitivity
+        """
+        metric = self.primary_metric.lower()
+        
+        # 尝试不同的键名变体
+        possible_keys = [
+            f"val_{metric}",
+            metric,
+            f"val_{metric.replace('_', '')}",
+            metric.replace('_', ''),
+        ]
+        
+        # 指标别名映射
+        aliases = {
+            'auroc': ['auc', 'roc_auc', 'auroc'],
+            'f1_macro': ['f1', 'f1_macro'],
+            'accuracy': ['acc', 'accuracy'],
+            'auprc': ['ap', 'average_precision', 'auprc'],
+        }
+        
+        for alias_key, alias_list in aliases.items():
+            if metric in alias_list:
+                for alias in alias_list:
+                    possible_keys.extend([f"val_{alias}", alias])
+        
+        for key in possible_keys:
+            if key in metrics:
+                return metrics[key]
+        
+        # 默认回退到 val_f1 或 val_accuracy
+        return metrics.get('val_f1', metrics.get('val_accuracy', 0.0))
     
     def save_checkpoint(self, filename: str):
         """保存检查点。"""
@@ -458,7 +519,21 @@ class DownstreamTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "best_val_metric": self.best_val_metric,
+            "task_name": self.task_name,
+            "primary_metric": self.primary_metric,
         }
+        
+        # 保存配置（如果有）
+        if self.config is not None:
+            try:
+                from types import SimpleNamespace
+                def to_dict(obj):
+                    if isinstance(obj, SimpleNamespace):
+                        return {k: to_dict(v) for k, v in vars(obj).items()}
+                    return obj
+                checkpoint["config"] = to_dict(self.config)
+            except Exception:
+                pass
         
         torch.save(checkpoint, checkpoint_path)
         self.logger.info(f"Saved checkpoint: {checkpoint_path}")
