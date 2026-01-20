@@ -184,8 +184,7 @@ def main():
     from src.data.transforms import get_pretrain_transforms
     
     transforms = get_pretrain_transforms(
-        sample_rate=config.data.sample_rate,
-        target_length=int(config.data.sample_rate * config.data.segment_duration)
+        sample_rate=config.data.sample_rate
     )
     
     train_dataset = PCGPretrainDataset(
