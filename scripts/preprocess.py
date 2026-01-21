@@ -27,12 +27,16 @@ import json
 import multiprocessing as mp
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+# 设置 multiprocessing 启动方法（修复容器环境中的兼容性问题）
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
 
 # 将项目根目录添加到路径以便导入
 project_root = Path(__file__).parent.parent
@@ -308,7 +312,11 @@ def process_all_recordings(
                 print(f"Processed {i + 1}/{len(wav_files)} recordings")
     else:
         # 并行处理
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        print("Starting parallel processing...")
+        # 使用spawn方法的context以确保兼容性
+        ctx = mp.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
+            print("Submitting tasks...")
             futures = {
                 executor.submit(
                     process_single_recording,
@@ -320,14 +328,41 @@ def process_all_recordings(
                 for wav_file in wav_files
             }
             
+            print(f"Submitted {len(futures)} tasks, waiting for results...")
             completed = 0
-            for future in as_completed(futures):
-                stats = future.result()
-                all_stats.append(stats)
-                completed += 1
-                
-                if completed % 10 == 0 or completed == len(wav_files):
-                    print(f"Processed {completed}/{len(wav_files)} recordings")
+            failed_tasks = 0
+            
+            try:
+                for future in as_completed(futures, timeout=7200):  # 2小时总超时
+                    try:
+                        stats = future.result(timeout=300)  # 单个任务5分钟超时
+                        all_stats.append(stats)
+                        completed += 1
+                        
+                        # 更频繁的进度更新
+                        if completed % 10 == 0 or completed == len(wav_files):
+                            print(f"Processed {completed}/{len(wav_files)} recordings")
+                            if stats.error is None and stats.num_cycles_passed_quality > 0:
+                                print(f"  Latest: {stats.subject_id}/{stats.recording_id} - {stats.num_cycles_passed_quality} cycles")
+                    except TimeoutError:
+                        wav_file = futures[future]
+                        print(f"Warning: Task timed out for {wav_file}")
+                        failed_tasks += 1
+                        completed += 1
+                    except Exception as e:
+                        wav_file = futures[future]
+                        print(f"Warning: Task failed for {wav_file}: {e}")
+                        failed_tasks += 1
+                        completed += 1
+            except TimeoutError:
+                print(f"\nError: Overall processing timed out after completing {completed}/{len(wav_files)} recordings")
+            except KeyboardInterrupt:
+                print(f"\nProcessing interrupted by user. Completed {completed}/{len(wav_files)} recordings")
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            
+            if failed_tasks > 0:
+                print(f"\nWarning: {failed_tasks} tasks failed or timed out")
     
     total_time = time.time() - start_time
     
@@ -469,7 +504,7 @@ def main():
     target_length = args.target_length if args.target_length else config.data.cycle.target_length
     num_substructures = args.num_substructures if args.num_substructures else config.data.num_substructures
     min_snr = args.min_snr if args.min_snr else config.data.filter.min_snr_db
-    num_workers = args.num_workers if args.num_workers else mp.cpu_count()
+    num_workers = args.num_workers if args.num_workers else min(mp.cpu_count(), 8)
     
     # 验证路径
     if not raw_dir.exists():
