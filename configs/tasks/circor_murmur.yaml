@@ -12,7 +12,7 @@ task:
 
 # 数据设置
 data:
-  base_dir: "data/downstream"
+  base_dir: "/root/autodl-tmp/data/downstream"
   task_name: "circor_murmur"
   sample_rate: 5000
   target_length: 4000  # 0.8秒

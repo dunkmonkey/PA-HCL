@@ -346,7 +346,7 @@ def process_dataset(
             logger.info("\nNext step: Prepare dataset with:")
             logger.info(f"  python scripts/data_preparation/prepare_{dataset_key}.py \\")
             logger.info(f"    --input-dir {extracted_dir} \\")
-            logger.info(f"    --output-dir ./data/raw/{dataset_key}")
+            logger.info(f"    --output-dir /root/autodl-tmp/data/raw/{dataset_key}")
         else:
             logger.warning(f"Expected directory not found: {extracted_dir}")
             logger.info(f"Check contents of: {extract_base_dir}")

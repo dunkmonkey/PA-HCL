@@ -11,8 +11,8 @@ experiment:
 # ============== 数据 ==============
 data:
   # 原始数据设置
-  raw_dir: "./data/raw"
-  processed_dir: "./data/processed"
+  raw_dir: "/root/autodl-tmp/data/raw"
+  processed_dir: "/root/autodl-tmp/data/processed"
   sample_rate: 5000  # Hz
   
   # 周期提取

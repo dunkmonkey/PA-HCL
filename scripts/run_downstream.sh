@@ -36,9 +36,9 @@ cd "$PROJECT_ROOT"
 # 默认配置
 PRETRAINED_MODEL="${PRETRAINED_MODEL:-checkpoints/pretrain/best_model.pt}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs}"
-DATA_DIR="${DATA_DIR:-data/downstream}"
-RAW_DIR="${RAW_DIR:-data/raw}"
-PROCESSED_DIR="${PROCESSED_DIR:-data/processed}"
+DATA_DIR="${DATA_DIR:-/root/autodl-tmp/data/downstream}"
+RAW_DIR="${RAW_DIR:-/root/autodl-tmp/data/raw}"
+PROCESSED_DIR="${PROCESSED_DIR:-/root/autodl-tmp/data/processed}"
 SEED="${SEED:-42}"
 
 # 可用任务

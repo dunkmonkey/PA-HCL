@@ -71,8 +71,8 @@ def parse_args():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='./data/raw/custom_organized',
-        help='Output directory for organized data (default: ./data/raw/custom_organized)'
+        default='/root/autodl-tmp/data/raw/custom_organized',
+        help='Output directory for organized data (default: /root/autodl-tmp/data/raw/custom_organized)'
     )
     parser.add_argument(
         '--copy',

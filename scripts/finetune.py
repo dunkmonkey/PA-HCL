@@ -179,7 +179,7 @@ def parse_args():
     data_group.add_argument(
         "--data-dir",
         type=str,
-        default="data/downstream",
+        default="/root/autodl-tmp/data/downstream",
         help="下游数据根目录"
     )
     data_group.add_argument(

@@ -59,8 +59,8 @@ def parse_args():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='./data/raw/pascal',
-        help='Output directory for organized data (default: ./data/raw/pascal)'
+        default='/root/autodl-tmp/data/raw/pascal',
+        help='Output directory for organized data (default: /root/autodl-tmp/data/raw/pascal)'
     )
     parser.add_argument(
         '--sets',

@@ -75,7 +75,7 @@ download_dataset() {
     
     python3 "$ROOT_DIR/scripts/data_preparation/download_datasets.py" \
         --dataset "$dataset" \
-        --output-dir "$ROOT_DIR/data/downloads" \
+        --output-dir "$DATA_ROOT/downloads" \
         --keep-archive
     
     if [ $? -eq 0 ]; then
@@ -91,7 +91,7 @@ download_dataset() {
 prepare_circor() {
     print_header "Preparing CirCor Dataset"
     
-    local input_dir="$ROOT_DIR/data/downloads/extracted/the-circor-digiscope-phonocardiogram-dataset-1.0.3"
+    local input_dir="$DATA_ROOT/downloads/extracted/the-circor-digiscope-phonocardiogram-dataset-1.0.3"
     
     if [ ! -d "$input_dir" ]; then
         print_error "CirCor dataset not found at: $input_dir"
@@ -101,12 +101,12 @@ prepare_circor() {
     
     python3 "$ROOT_DIR/scripts/data_preparation/prepare_circor.py" \
         --input-dir "$input_dir" \
-        --output-dir "$ROOT_DIR/data/raw/circor" \
+        --output-dir "$DATA_ROOT/raw/circor" \
         --verbose
     
     if [ $? -eq 0 ]; then
         print_success "CirCor dataset prepared successfully"
-        print_info "Output: ./data/raw/circor"
+        print_info "Output: $DATA_ROOT/raw/circor"
         return 0
     else
         print_error "CirCor preparation failed"
@@ -118,7 +118,7 @@ prepare_circor() {
 prepare_physionet2016() {
     print_header "Preparing PhysioNet 2016 Dataset"
     
-    local input_dir="$ROOT_DIR/data/downloads/extracted/classification-of-heart-sound-recordings-the-physionet-computing-in-cardiology-challenge-2016-1.0.0"
+    local input_dir="$DATA_ROOT/downloads/extracted/classification-of-heart-sound-recordings-the-physionet-computing-in-cardiology-challenge-2016-1.0.0"
     
     if [ ! -d "$input_dir" ]; then
         print_error "PhysioNet 2016 dataset not found at: $input_dir"
@@ -128,13 +128,13 @@ prepare_physionet2016() {
     
     python3 "$ROOT_DIR/scripts/data_preparation/prepare_physionet2016.py" \
         --input-dir "$input_dir" \
-        --output-dir "$ROOT_DIR/data/raw/physionet2016" \
+        --output-dir "$DATA_ROOT/raw/physionet2016" \
         --include-validation \
         --verbose
     
     if [ $? -eq 0 ]; then
         print_success "PhysioNet 2016 dataset prepared successfully"
-        print_info "Output: ./data/raw/physionet2016"
+        print_info "Output: $DATA_ROOT/raw/physionet2016"
         return 0
     else
         print_error "PhysioNet 2016 preparation failed"
@@ -146,7 +146,7 @@ prepare_physionet2016() {
 prepare_pascal() {
     print_header "Preparing Pascal Challenge Dataset"
     
-    local input_dir="$ROOT_DIR/data/downloads/extracted/heartchallenge"
+    local input_dir="$DATA_ROOT/downloads/extracted/heartchallenge"
     
     if [ ! -d "$input_dir" ]; then
         print_error "Pascal dataset not found at: $input_dir"
@@ -158,12 +158,12 @@ prepare_pascal() {
     
     python3 "$ROOT_DIR/scripts/data_preparation/prepare_pascal.py" \
         --input-dir "$input_dir" \
-        --output-dir "$ROOT_DIR/data/raw/pascal" \
+        --output-dir "$DATA_ROOT/raw/pascal" \
         --verbose
     
     if [ $? -eq 0 ]; then
         print_success "Pascal dataset prepared successfully"
-        print_info "Output: ./data/raw/pascal"
+        print_info "Output: $DATA_ROOT/raw/pascal"
         return 0
     else
         print_error "Pascal preparation failed"
@@ -175,7 +175,7 @@ prepare_pascal() {
 prepare_custom() {
     print_header "Preparing Custom Dataset"
     
-    local input_dir="$ROOT_DIR/data/raw"
+    local input_dir="$DATA_ROOT/raw"
     
     # Check if Normal or Abnormal folders exist
     if [ ! -d "$input_dir/Normal" ] && [ ! -d "$input_dir/Abnormal" ]; then
@@ -191,12 +191,12 @@ prepare_custom() {
     
     python3 "$ROOT_DIR/scripts/data_preparation/prepare_custom.py" \
         --input-dir "$input_dir" \
-        --output-dir "$ROOT_DIR/data/raw/custom_organized" \
+        --output-dir "$DATA_ROOT/raw/custom_organized" \
         --verbose
     
     if [ $? -eq 0 ]; then
         print_success "Custom dataset prepared successfully"
-        print_info "Output: ./data/raw/custom_organized"
+        print_info "Output: $DATA_ROOT/raw/custom_organized"
         return 0
     else
         print_error "Custom dataset preparation failed"
@@ -216,12 +216,12 @@ run_preprocessing() {
     
     python3 "$ROOT_DIR/scripts/preprocess.py" \
         --raw_dir "$dataset_dir" \
-        --output_dir "$ROOT_DIR/data/processed" \
+        --output_dir "$DATA_ROOT/processed" \
         --num_workers 4
     
     if [ $? -eq 0 ]; then
         print_success "Preprocessing complete"
-        print_info "Processed data: ./data/processed"
+        print_info "Processed data: $DATA_ROOT/processed"
         return 0
     else
         print_error "Preprocessing failed"
@@ -267,6 +267,7 @@ main() {
     # Set script directory and repo root
     SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
     ROOT_DIR="$( cd "$SCRIPT_DIR/../.." && pwd )"
+    DATA_ROOT="/root/autodl-tmp/data"  # Data directory location
     cd "$SCRIPT_DIR"
     
     case "$command" in
@@ -325,16 +326,16 @@ main() {
             # Map dataset name to directory
             case "$dataset" in
                 circor)
-                    run_preprocessing "$ROOT_DIR/data/raw/circor"
+                    run_preprocessing "$DATA_ROOT/raw/circor"
                     ;;
                 physionet2016)
-                    run_preprocessing "$ROOT_DIR/data/raw/physionet2016"
+                    run_preprocessing "$DATA_ROOT/raw/physionet2016"
                     ;;
                 pascal)
-                    run_preprocessing "$ROOT_DIR/data/raw/pascal"
+                    run_preprocessing "$DATA_ROOT/raw/pascal"
                     ;;
                 custom)
-                    run_preprocessing "$ROOT_DIR/data/raw/custom_organized"
+                    run_preprocessing "$DATA_ROOT/raw/custom_organized"
                     ;;
                 *)
                     # Assume it's a directory path
@@ -356,16 +357,16 @@ main() {
                 circor|physionet2016)
                     download_dataset "$dataset" && \
                     prepare_"$dataset" && \
-                    run_preprocessing "$ROOT_DIR/data/raw/$dataset"
+                    run_preprocessing "$DATA_ROOT/raw/$dataset"
                     ;;
                 pascal)
                     print_warning "Pascal requires manual download"
                     prepare_pascal && \
-                    run_preprocessing "$ROOT_DIR/data/raw/pascal"
+                    run_preprocessing "$DATA_ROOT/raw/pascal"
                     ;;
                 custom)
                     prepare_custom && \
-                    run_preprocessing "$ROOT_DIR/data/raw/custom_organized"
+                    run_preprocessing "$DATA_ROOT/raw/custom_organized"
                     ;;
                 *)
                     print_error "Unknown dataset: $dataset"

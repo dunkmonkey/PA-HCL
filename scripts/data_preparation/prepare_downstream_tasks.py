@@ -835,14 +835,14 @@ def parse_args():
     parser.add_argument(
         "--processed-dir",
         type=str,
-        default="data/processed",
+        default="/root/autodl-tmp/data/processed",
         help="预处理后数据的根目录"
     )
     
     parser.add_argument(
         "--raw-dir",
         type=str,
-        default="data/raw",
+        default="/root/autodl-tmp/data/raw",
         help="原始数据的根目录"
     )
     
@@ -856,7 +856,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="data/downstream",
+        default="/root/autodl-tmp/data/downstream",
         help="输出目录"
     )
     

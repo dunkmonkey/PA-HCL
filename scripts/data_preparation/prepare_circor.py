@@ -59,8 +59,8 @@ def parse_args():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='./data/raw/circor',
-        help='Output directory for organized data (default: ./data/raw/circor)'
+        default='/root/autodl-tmp/data/raw/circor',
+        help='Output directory for organized data (default: /root/autodl-tmp/data/raw/circor)'
     )
     parser.add_argument(
         '--copy',

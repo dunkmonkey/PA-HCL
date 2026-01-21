@@ -88,7 +88,7 @@ pip install -e .
 按受试者结构组织原始数据：
 
 ```
-data/raw/
+/root/autodl-tmp/data/raw/
 ├── subject_0001/
 │   ├── rec_01.wav
 │   ├── rec_02.wav
@@ -141,7 +141,7 @@ python scripts/finetune.py \
 ```bash
 python scripts/evaluate.py \
     --checkpoint outputs/downstream/best_model.pt \
-    --data-dir data/processed \
+    --data-dir /root/autodl-tmp/data/processed \
     --split test \
     --confusion-matrix
 ```

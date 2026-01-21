@@ -287,7 +287,7 @@ def main():
     
     # Determine output directory
     if args.output_dir is None:
-        output_dir = Path(f"./data/raw/{dataset_type}").resolve()
+        output_dir = Path(f"/root/autodl-tmp/data/raw/{dataset_type}").resolve()
         logger.info(f"Auto-generated output directory: {output_dir}")
     else:
         output_dir = Path(args.output_dir).resolve()

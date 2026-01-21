@@ -95,11 +95,11 @@ python download_datasets.py --dataset circor --output-dir ./data/downloads
 # 3. 准备数据集
 python prepare_circor.py \
     --input-dir ./data/downloads/extracted/the-circor-digiscope-phonocardiogram-dataset-1.0.3 \
-    --output-dir ./data/raw/circor
+    --output-dir /root/autodl-tmp/data/raw/circor
 
 # 4. 运行预处理
 cd ../..
-python scripts/preprocess.py --raw_dir data/raw/circor --output_dir data/processed
+python scripts/preprocess.py --raw_dir /root/autodl-tmp/data/raw/circor --output_dir /root/autodl-tmp/data/processed
 ```
 
 ---
@@ -126,7 +126,7 @@ python download_datasets.py --dataset circor --output-dir ./data/downloads
 ```bash
 python prepare_circor.py \
     --input-dir ./data/downloads/extracted/the-circor-digiscope-phonocardiogram-dataset-1.0.3 \
-    --output-dir ./data/raw/circor \
+    --output-dir /root/autodl-tmp/data/raw/circor \
     --verbose
 ```
 
@@ -138,7 +138,7 @@ python prepare_circor.py \
 
 **输出结构**：
 ```
-data/raw/circor/
+/root/autodl-tmp/data/raw/circor/
 ├── subject_10001/
 │   ├── rec_AV.wav  # Aortic Valve
 │   ├── rec_MV.wav  # Mitral Valve
@@ -165,7 +165,7 @@ python download_datasets.py --dataset physionet2016 --output-dir ./data/download
 ```bash
 python prepare_physionet2016.py \
     --input-dir ./data/downloads/extracted/classification-of-heart-sound-recordings-the-physionet-computing-in-cardiology-challenge-2016-1.0.0 \
-    --output-dir ./data/raw/physionet2016 \
+    --output-dir /root/autodl-tmp/data/raw/physionet2016 \
     --include-validation \
     --verbose
 ```
@@ -176,7 +176,7 @@ python prepare_physionet2016.py \
 
 **输出结构**：
 ```
-data/raw/physionet2016/
+/root/autodl-tmp/data/raw/physionet2016/
 ├── subject_a0001/
 │   └── rec_01.wav
 ├── subject_a0002/
@@ -211,7 +211,7 @@ python prepare_pascal.py \
 
 **输出结构**：
 ```
-data/raw/pascal/
+/root/autodl-tmp/data/raw/pascal/
 ├── subject_a0001/
 │   └── rec_01.wav
 ├── subject_b0001/
@@ -228,7 +228,7 @@ data/raw/pascal/
 您的自建数据集应按以下结构组织：
 
 ```
-data/raw/
+/root/autodl-tmp/data/raw/
 ├── Abnormal/
 │   ├── asd_case0001_female_4_20s_USA_A.wav
 │   ├── asd_case0001_female_4_20s_USA_E.wav
@@ -268,14 +268,14 @@ data/raw/
 
 ```bash
 python prepare_custom.py \
-    --input-dir ./data/raw \
-    --output-dir ./data/raw/custom_organized \
+    --input-dir /root/autodl-tmp/data/raw \
+    --output-dir /root/autodl-tmp/data/raw/custom_organized \
     --verbose
 ```
 
 **输出结构**：
 ```
-data/raw/custom_organized/
+/root/autodl-tmp/data/raw/custom_organized/
 ├── subject_asd_case0001/
 │   ├── rec_A.wav
 │   ├── rec_E.wav
@@ -326,7 +326,7 @@ python download_datasets.py --dataset circor --keep-archive
 
 ```bash
 # 自动检测数据集类型
-python prepare_data.py --input-dir /path/to/dataset --output-dir ./data/raw/organized
+python prepare_data.py --input-dir /path/to/dataset --output-dir /root/autodl-tmp/data/raw/organized
 
 # 手动指定数据集类型
 python prepare_data.py --dataset-type circor --input-dir /path/to/circor
@@ -375,26 +375,26 @@ python prepare_data.py --dataset-type all --base-dir /path/to/datasets
 
 ```bash
 # 创建符号链接（推荐）
-python prepare_circor.py --input-dir /path/to/data --output-dir ./data/raw/circor
+python prepare_circor.py --input-dir /path/to/data --output-dir /root/autodl-tmp/data/raw/circor
 
 # 复制文件
-python prepare_circor.py --input-dir /path/to/data --output-dir ./data/raw/circor --copy
+python prepare_circor.py --input-dir /path/to/data --output-dir /root/autodl-tmp/data/raw/circor --copy
 ```
 
 ### 2. 如何验证准备结果
 
 ```bash
 # 检查输出目录结构
-tree -L 2 data/raw/circor
+tree -L 2 /root/autodl-tmp/data/raw/circor
 
 # 检查受试者数量
-ls -1 data/raw/circor | wc -l
+ls -1 /root/autodl-tmp/data/raw/circor | wc -l
 
 # 检查录音文件数量
-find data/raw/circor -name "*.wav" | wc -l
+find /root/autodl-tmp/data/raw/circor -name "*.wav" | wc -l
 
 # 查看元数据
-head -n 20 data/raw/circor/circor_metadata.csv
+head -n 20 /root/autodl-tmp/data/raw/circor/circor_metadata.csv
 ```
 
 ### 3. 文件命名不规范怎么办？

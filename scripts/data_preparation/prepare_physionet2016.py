@@ -59,8 +59,8 @@ def parse_args():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='./data/raw/physionet2016',
-        help='Output directory for organized data (default: ./data/raw/physionet2016)'
+        default='/root/autodl-tmp/data/raw/physionet2016',
+        help='Output directory for organized data (default: /root/autodl-tmp/data/raw/physionet2016)'
     )
     parser.add_argument(
         '--include-validation',

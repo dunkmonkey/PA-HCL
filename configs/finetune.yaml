@@ -20,9 +20,9 @@ task:
 
 # 数据设置
 data:
-  base_dir: "data/downstream"     # 下游任务数据根目录
-  raw_dir: "data/raw"             # 原始数据目录
-  processed_dir: "data/processed" # 预处理数据目录
+  base_dir: "/root/autodl-tmp/data/downstream"     # 下游任务数据根目录
+  raw_dir: "/root/autodl-tmp/data/raw"             # 原始数据目录
+  processed_dir: "/root/autodl-tmp/data/processed" # 预处理数据目录
   sample_rate: 5000
   target_length: 4000
   num_substructures: 4
