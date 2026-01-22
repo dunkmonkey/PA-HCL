@@ -19,6 +19,7 @@ PA-HCL 预训练脚本。
 
 import argparse
 import os
+import shutil
 import sys
 import yaml
 from pathlib import Path
@@ -234,9 +235,13 @@ def main():
         output_path = Path(args.output_dir) / args.experiment_name
         output_path.mkdir(parents=True, exist_ok=True)
         config_save_path = output_path / 'config.yaml'
-        with open(config_save_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config.to_dict() if hasattr(config, 'to_dict') else dict(config), f, default_flow_style=False, allow_unicode=True)
-        logger.info(f"Configuration saved to {config_save_path}")
+        
+        # 直接复制原始配置文件
+        try:
+            shutil.copy(args.config, config_save_path)
+            logger.info(f"Configuration copied to {config_save_path}")
+        except Exception as e:
+            logger.warning(f"Failed to copy config file: {e}")
     
     # 创建训练器
     from src.trainers.pretrain_trainer import PretrainTrainer

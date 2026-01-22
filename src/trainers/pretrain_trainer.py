@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # Step 5: for normalize
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -173,11 +174,13 @@ class PretrainTrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         
-        # Loss function
+        # Loss function (Step 4 & 5: 支持 MoCo)
+        use_moco = getattr(model, 'use_moco', False) if hasattr(model, 'use_moco') else False
         self.criterion = HierarchicalContrastiveLoss(
             temperature=temperature,
             lambda_cycle=lambda_cycle,
-            lambda_sub=lambda_sub
+            lambda_sub=lambda_sub,
+            use_moco=use_moco  # Step 4: 传递 MoCo 标志
         )
         
         # Optimizer
@@ -269,21 +272,57 @@ class PretrainTrainer:
         try:
             import wandb
             
+            # 准备完整的配置字典
+            wandb_config = {
+                # 训练参数
+                "num_epochs": self.num_epochs,
+                "learning_rate": self.learning_rate,
+                "weight_decay": self.weight_decay,
+                "warmup_epochs": self.warmup_epochs,
+                "min_lr": self.min_lr,
+                "batch_size": self.train_loader.batch_size,
+                "gradient_accumulation_steps": self.gradient_accumulation_steps,
+                "grad_clip_norm": self.grad_clip_norm,
+                # 损失参数
+                "temperature": self.temperature,
+                "lambda_cycle": self.lambda_cycle,
+                "lambda_sub": self.lambda_sub,
+                # 其他设置
+                "use_amp": self.use_amp,
+                "distributed": self.distributed,
+                "seed": self.seed,
+            }
+            
+            # 如果有config对象，添加模型配置
+            if self.config is not None:
+                if hasattr(self.config, 'model'):
+                    wandb_config.update({
+                        "encoder_dim": getattr(self.config.model, 'encoder_dim', None),
+                        "mamba_d_model": getattr(self.config.model, 'd_model', None),
+                        "mamba_n_layers": getattr(self.config.model, 'n_layers', None),
+                        "projection_dim": getattr(self.config.model, 'projection_dim', None),
+                        "use_moco": getattr(self.config.model, 'use_moco', False),
+                    })
+            
             wandb.init(
                 project=self.wandb_project,
                 name=self.experiment_name,
-                config={
-                    "num_epochs": self.num_epochs,
-                    "learning_rate": self.learning_rate,
-                    "weight_decay": self.weight_decay,
-                    "temperature": self.temperature,
-                    "lambda_cycle": self.lambda_cycle,
-                    "lambda_sub": self.lambda_sub,
-                    "batch_size": self.train_loader.batch_size,
-                }
+                config=wandb_config,
+                # 设置同步tensorboard
+                sync_tensorboard=True,
             )
+            
+            # 记录模型架构
+            if hasattr(self.model, 'module'):
+                wandb.watch(self.model.module, log="all", log_freq=100)
+            else:
+                wandb.watch(self.model, log="all", log_freq=100)
+                
         except ImportError:
             self.logger.warning("wandb not installed, disabling W&B logging")
+            self.use_wandb = False
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize wandb: {e}")
             self.use_wandb = False
     
     def train(self) -> Dict[str, float]:
@@ -368,17 +407,25 @@ class PretrainTrainer:
                     outputs = self.model.module.forward_pretrain(
                         view1, view2, subs1, subs2
                     )
+                    model_module = self.model.module
                 else:
                     outputs = self.model.forward_pretrain(
                         view1, view2, subs1, subs2
                     )
+                    model_module = self.model
+                
+                # Step 5: 获取队列（如果使用 MoCo）
+                queue = None
+                if hasattr(model_module, 'use_moco') and model_module.use_moco:
+                    queue = model_module.queue.clone().detach()
                 
                 # Compute loss
                 loss, loss_dict = self.criterion(
                     outputs["cycle_proj1"],
                     outputs["cycle_proj2"],
                     outputs["sub_proj1"],
-                    outputs["sub_proj2"]
+                    outputs["sub_proj2"],
+                    queue=queue  # Step 5: 传递队列
                 )
                 
                 # Scale loss for gradient accumulation
@@ -401,16 +448,29 @@ class PretrainTrainer:
                     self.grad_clip_norm
                 )
                 
-                # Optimizer step
+                # Optimizer step (must be before scheduler.step())
                 if self.use_amp:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
                     self.optimizer.step()
                 
-                self.optimizer.zero_grad()
+                # Scheduler step (after optimizer.step())
                 self.scheduler.step()
+                
+                self.optimizer.zero_grad()
                 self.global_step += 1
+                
+                # Step 5: MoCo 动量更新和队列管理
+                if hasattr(model_module, 'use_moco') and model_module.use_moco:
+                    # 动量更新编码器
+                    model_module._momentum_update()
+                    
+                    # 队列更新：使用 cycle_proj2 (来自动量编码器)
+                    # 需要归一化并入队
+                    with torch.no_grad():
+                        keys = F.normalize(outputs["cycle_proj2"], dim=1)
+                        model_module._dequeue_and_enqueue(keys)
             
             # Accumulate metrics
             total_loss += loss_dict["loss_total"]
@@ -473,16 +533,24 @@ class PretrainTrainer:
                     outputs = self.model.module.forward_pretrain(
                         view1, view2, subs1, subs2
                     )
+                    model_module = self.model.module
                 else:
                     outputs = self.model.forward_pretrain(
                         view1, view2, subs1, subs2
                     )
+                    model_module = self.model
+                
+                # Step 5: 获取队列（验证时也需要）
+                queue = None
+                if hasattr(model_module, 'use_moco') and model_module.use_moco:
+                    queue = model_module.queue.clone().detach()
                 
                 _, loss_dict = self.criterion(
                     outputs["cycle_proj1"],
                     outputs["cycle_proj2"],
                     outputs["sub_proj1"],
-                    outputs["sub_proj2"]
+                    outputs["sub_proj2"],
+                    queue=queue  # Step 5
                 )
             
             total_loss += loss_dict["loss_total"]
@@ -521,11 +589,17 @@ class PretrainTrainer:
         
         # TensorBoard logging
         if self.writer is not None:
+            # 使用 global_step 作为 x 轴以获得更好的可视化效果
             for k, v in train_metrics.items():
-                self.writer.add_scalar(f"train/{k}", v, self.current_epoch + 1)
+                if k != 'epoch_time':  # 跳过非损失指标
+                    self.writer.add_scalar(f"train/{k}", v, self.global_step)
             for k, v in val_metrics.items():
-                self.writer.add_scalar(f"val/{k}", v, self.current_epoch + 1)
-            self.writer.add_scalar("learning_rate", self.optimizer.param_groups[0]['lr'], self.current_epoch + 1)
+                self.writer.add_scalar(f"val/{k}", v, self.global_step)
+            # 记录学习率和 epoch
+            self.writer.add_scalar("lr", self.optimizer.param_groups[0]['lr'], self.global_step)
+            self.writer.add_scalar("epoch", self.current_epoch + 1, self.global_step)
+            # 确保数据写入磁盘
+            self.writer.flush()
         
         # W&B logging
         if self.use_wandb:
@@ -534,9 +608,24 @@ class PretrainTrainer:
                 
                 log_dict = {
                     "epoch": self.current_epoch + 1,
-                    **{f"train/{k}": v for k, v in train_metrics.items()},
-                    **{f"val/{k}": v for k, v in val_metrics.items()},
+                    "global_step": self.global_step,
                 }
+                
+                # 添加训练指标
+                for k, v in train_metrics.items():
+                    log_dict[f"train/{k}"] = v
+                
+                # 添加验证指标
+                for k, v in val_metrics.items():
+                    log_dict[f"val/{k}"] = v
+                
+                # 记录学习率
+                log_dict["learning_rate"] = self.optimizer.param_groups[0]['lr']
+                
+                # 如果有最佳验证损失，也记录
+                if val_metrics:
+                    log_dict["best_val_loss"] = self.best_val_loss
+                
                 wandb.log(log_dict, step=self.global_step)
             except Exception as e:
                 self.logger.warning(f"W&B logging failed: {e}")

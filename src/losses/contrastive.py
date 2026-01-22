@@ -37,41 +37,67 @@ class InfoNCELoss(nn.Module):
     Loss = -log(exp(sim(z_i, z_j)/τ) / Σ_k exp(sim(z_i, z_k)/τ))
     
     其中 (i, j) 是正样本对，k 遍历所有负样本。
+    
+    Step 4: 支持 MoCo 风格的队列负样本
     """
     
     def __init__(
         self,
         temperature: float = 0.07,
         normalize: bool = True,
-        reduction: str = "mean"
+        reduction: str = "mean",
+        use_queue: bool = False  # Step 4: 是否使用队列负样本
     ):
         """
         参数:
             temperature: 温度缩放参数 (τ)
             normalize: 是否在计算相似度之前对特征进行 L2 归一化
             reduction: 如何减少损失 ("mean", "sum", "none")
+            use_queue: 是否使用队列负样本（MoCo 模式）
         """
         super().__init__()
         self.temperature = temperature
         self.normalize = normalize
         self.reduction = reduction
+        self.use_queue = use_queue
     
     def forward(
         self,
         z1: torch.Tensor,
         z2: torch.Tensor,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch.Tensor] = None,
+        queue: Optional[torch.Tensor] = None  # Step 4: 队列特征 [D, K]
     ) -> torch.Tensor:
         """
         计算 InfoNCE 损失。
         
+        Step 4: 支持队列模式
+        - SimCLR 模式 (use_queue=False): 负样本来自同一 batch
+        - MoCo 模式 (use_queue=True): 负样本来自队列
+        
         参数:
-            z1: 来自第一个增强视图的特征 [B, D]
-            z2: 来自第二个增强视图的特征 [B, D]
+            z1: 来自第一个增强视图的特征 [B, D] (query)
+            z2: 来自第二个增强视图的特征 [B, D] (key)
             labels: 监督对比变体的可选标签
+            queue: 队列中的负样本特征 [D, K] (MoCo 模式)
             
         返回:
             标量损失值
+        """
+        if self.use_queue and queue is not None:
+            # MoCo 模式: 使用队列负样本
+            return self._forward_with_queue(z1, z2, queue)
+        else:
+            # SimCLR 模式: batch 内对比
+            return self._forward_simclr(z1, z2)
+    
+    def _forward_simclr(
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        SimCLR 风格的 InfoNCE 损失（batch 内对比）。
         """
         batch_size = z1.shape[0]
         device = z1.device
@@ -113,6 +139,48 @@ class InfoNCELoss(nn.Module):
             return loss.sum()
         else:
             return loss
+    
+    def _forward_with_queue(
+        self,
+        query: torch.Tensor,  # z1 from query encoder [B, D]
+        key: torch.Tensor,    # z2 from momentum encoder [B, D]
+        queue: torch.Tensor   # queue features [D, K]
+    ) -> torch.Tensor:
+        """
+        MoCo 风格的 InfoNCE 损失（使用队列负样本）。
+        
+        参数:
+            query: query 编码器的特征 [B, D]
+            key: momentum 编码器的特征 [B, D]
+            queue: 队列中的负样本 [D, K]
+            
+        返回:
+            损失值
+        """
+        batch_size = query.shape[0]
+        
+        # 归一化
+        if self.normalize:
+            query = F.normalize(query, dim=1)
+            key = F.normalize(key, dim=1)
+            # 队列已经归一化（在入队时）
+        
+        # 正样本对: query 与对应的 key 的相似度 [B]
+        pos_sim = torch.einsum('bd,bd->b', [query, key]) / self.temperature
+        
+        # 负样本: query 与队列中所有特征的相似度 [B, K]
+        neg_sim = torch.mm(query, queue) / self.temperature  # [B, D] x [D, K] = [B, K]
+        
+        # 拼接正负样本相似度 [B, 1+K]
+        logits = torch.cat([pos_sim.unsqueeze(1), neg_sim], dim=1)
+        
+        # 正样本索引是 0（第一个位置）
+        labels = torch.zeros(batch_size, dtype=torch.long, device=query.device)
+        
+        # 交叉熵损失 = -log(exp(pos) / (exp(pos) + sum(exp(neg))))
+        loss = F.cross_entropy(logits, labels, reduction=self.reduction)
+        
+        return loss
 
 
 class SubstructureContrastiveLoss(nn.Module):
@@ -243,6 +311,8 @@ class HierarchicalContrastiveLoss(nn.Module):
     这种分层设计同时捕捉：
     1. 整体心律和模式
     2. 每个阶段的细粒度病理特征
+    
+    Step 4: 支持周期级 MoCo 队列
     """
     
     def __init__(
@@ -251,7 +321,8 @@ class HierarchicalContrastiveLoss(nn.Module):
         lambda_cycle: float = 1.0,
         lambda_sub: float = 1.0,
         normalize: bool = True,
-        align_substructures: bool = True
+        align_substructures: bool = True,
+        use_moco: bool = False  # Step 4: 是否使用 MoCo（仅周期级）
     ):
         """
         参数:
@@ -260,17 +331,22 @@ class HierarchicalContrastiveLoss(nn.Module):
             lambda_sub: 子结构级损失的权重
             normalize: 是否归一化特征
             align_substructures: 是否按索引对齐子结构
+            use_moco: 周期级是否使用 MoCo 队列（子结构级始终用 SimCLR）
         """
         super().__init__()
         
         self.lambda_cycle = lambda_cycle
         self.lambda_sub = lambda_sub
+        self.use_moco = use_moco
         
+        # 周期级损失（支持队列）
         self.cycle_loss = InfoNCELoss(
             temperature=temperature,
-            normalize=normalize
+            normalize=normalize,
+            use_queue=use_moco  # Step 4
         )
         
+        # 子结构级损失（始终使用 SimCLR）
         self.sub_loss = SubstructureContrastiveLoss(
             temperature=temperature,
             normalize=normalize,
@@ -282,25 +358,34 @@ class HierarchicalContrastiveLoss(nn.Module):
         cycle_z1: torch.Tensor,
         cycle_z2: torch.Tensor,
         sub_z1: torch.Tensor,
-        sub_z2: torch.Tensor
+        sub_z2: torch.Tensor,
+        queue: Optional[torch.Tensor] = None  # Step 4: 队列特征 [D, K]
     ) -> Tuple[torch.Tensor, dict]:
         """
         计算分层对比损失。
+        
+        Step 4: 支持 MoCo 模式
+        - SimCLR 模式: 周期级和子结构级都用 batch 内对比
+        - MoCo 模式: 周期级用队列，子结构级用 batch 内对比
         
         参数:
             cycle_z1: 来自 view1 的周期级投影 [B, D]
             cycle_z2: 来自 view2 的周期级投影 [B, D]
             sub_z1: 来自 view1 的子结构投影 [B, K, D]
             sub_z2: 来自 view2 的子结构投影 [B, K, D]
+            queue: 周期级队列特征 [D, K] (MoCo 模式)
             
         返回:
             (total_loss, loss_dict) 的元组，其中 loss_dict 包含
             用于记录的单个损失分量
         """
-        # 周期级损失
-        loss_cycle = self.cycle_loss(cycle_z1, cycle_z2)
+        # 周期级损失（可能使用队列）
+        if self.use_moco and queue is not None:
+            loss_cycle = self.cycle_loss(cycle_z1, cycle_z2, queue=queue)
+        else:
+            loss_cycle = self.cycle_loss(cycle_z1, cycle_z2)
         
-        # 子结构级损失
+        # 子结构级损失（始终 SimCLR）
         loss_sub = self.sub_loss(sub_z1, sub_z2)
         
         # 组合损失

@@ -50,6 +50,11 @@ model:
   # 子结构投影
   sub_proj_hidden_dim: 256
   sub_proj_output_dim: 64
+  
+  # MoCo 设置 (Step 2 & 3)
+  use_moco: false  # 是否启用 MoCo 风格动量编码器（仅周期级）
+  moco_momentum: 0.999  # 动量系数（默认 0.999）
+  queue_size: 8192  # Step 3: 周期级特征队列大小（约 256MB 显存）
 
 # 损失函数
 loss:
@@ -64,18 +69,27 @@ training:
   num_epochs: 100
   batch_size: 64
   num_workers: 4
+  pin_memory: true  # 加速数据传输
+  prefetch_factor: 2  # 预取批次数量
   
-  # 优化器
-  learning_rate: 1e-3
+  # 优化器 (Step 5: 根据有效batch size调整)
+  # 有效 batch_size = 64 * 4 = 256
+  # 学习率线性缩放: lr = base_lr * (effective_batch / base_batch)
+  # base_lr = 1e-3 for batch_size=64, so for 256: lr = 1e-3 * (256/64) = 4e-3
+  # 但考虑到稳定性，使用 2e-3 (保守的缩放因子 2x)
+  learning_rate: 2e-3  # Step 5: 从 1e-3 提升到 2e-3
   weight_decay: 1e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1e-8
   
-  # 调度器
-  warmup_epochs: 10
+  # 调度器 (Step 5: 延长 warmup)
+  warmup_epochs: 20  # Step 5: 从 10 延长到 20（因有效batch size增大）
   min_lr: 1e-6
   
-  # 训练技巧
-  use_amp: true
-  gradient_accumulation_steps: 1
+  # 训练技巧 (Step 1优化)
+  use_amp: true  # 启用混合精度训练
+  gradient_accumulation_steps: 4  # 有效batch_size = 64 * 4 = 256
   grad_clip_norm: 1.0
   
   # 日志和保存
