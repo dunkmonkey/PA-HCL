@@ -180,49 +180,44 @@ def main():
     set_seed(args.seed)
     
     # 构建数据集
-    from src.data.dataset import PCGPretrainDataset, create_dataloaders
+    from src.data.dataset import PCGPretrainDataset, create_dataloaders, create_subject_wise_split
     from src.data.transforms import get_pretrain_transforms
     
     transforms = get_pretrain_transforms(
         sample_rate=config.data.sample_rate
     )
     
-    train_dataset = PCGPretrainDataset(
+    # 加载完整数据集
+    full_dataset = PCGPretrainDataset(
         data_dir=config.data.processed_dir,
-        split="train",
         transform=transforms,
         num_substructures=config.data.num_substructures,
     )
     
-    val_dataset = PCGPretrainDataset(
-        data_dir=config.data.processed_dir,
-        split="val",
-        transform=transforms,
-        num_substructures=config.data.num_substructures,
-    ) if Path(config.data.processed_dir).exists() else None
+    # 创建受试者级划分 (9:1 = 训练:验证)
+    train_indices, val_indices, _ = create_subject_wise_split(
+        full_dataset,
+        train_ratio=0.9,
+        val_ratio=0.1,
+        test_ratio=0.0,
+        seed=args.seed
+    )
     
     if is_main:
-        logger.info(f"Training samples: {len(train_dataset)}")
-        if val_dataset:
-            logger.info(f"Validation samples: {len(val_dataset)}")
+        logger.info(f"Total samples: {len(full_dataset)}")
+        logger.info(f"Training samples: {len(train_indices)} ({len(train_indices)/len(full_dataset)*100:.1f}%)")
+        logger.info(f"Validation samples: {len(val_indices)} ({len(val_indices)/len(full_dataset)*100:.1f}%)")
+        logger.info("Using subject-wise split to prevent data leakage")
     
-    # 创建数据加载器
-    train_loader = create_dataloaders(
-        train_dataset,
+    # 创建数据加载器（使用受试者级划分）
+    train_loader, val_loader, _ = create_dataloaders(
+        full_dataset,
+        train_indices=train_indices,
+        val_indices=val_indices,
         batch_size=config.training.batch_size // world_size,
         num_workers=config.training.num_workers,
         distributed=args.distributed,
     )
-    
-    val_loader = None
-    if val_dataset:
-        val_loader = create_dataloaders(
-            val_dataset,
-            batch_size=config.training.batch_size // world_size,
-            num_workers=config.training.num_workers,
-            distributed=args.distributed,
-            shuffle=False,
-        )
     
     # 构建模型
     from src.models.pahcl import build_pahcl_model
