@@ -189,6 +189,31 @@ def parse_args():
         help="数据加载工作进程数"
     )
     
+    # 实验监控
+    tracking_group = parser.add_argument_group("实验监控")
+    tracking_group.add_argument(
+        "--tensorboard",
+        action="store_true",
+        help="启用 TensorBoard 日志记录"
+    )
+    tracking_group.add_argument(
+        "--wandb",
+        action="store_true",
+        help="启用 WandB 实验跟踪"
+    )
+    tracking_group.add_argument(
+        "--wandb-project",
+        type=str,
+        default="PA-HCL",
+        help="WandB 项目名称"
+    )
+    tracking_group.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="WandB 实体/用户名"
+    )
+    
     return parser.parse_args()
 
 
@@ -413,7 +438,8 @@ def main():
     pretrained_model = load_pretrained_encoder(
         args.pretrained,
         device,
-        config
+        config,
+        logger=logger  # Step 2: 传递 logger 以获取详细加载信息
     )
     
     # 获取编码器
@@ -496,6 +522,10 @@ def main():
         seed=args.seed,
         task_name=task_name,
         primary_metric=primary_metric,
+        use_tensorboard=args.tensorboard,
+        use_wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
     )
     
     # ============== 训练 ==============

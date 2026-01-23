@@ -607,6 +607,128 @@ cnn_channels: [32, 64, 128, 128]  # 最后一层不增长
 
 ---
 
-**文档版本**: v1.0  
-**创建日期**: 2026-01-22  
+## 🔄 下游微调兼容性
+
+### 问题背景
+
+预训练模型启用 MoCo 后，检查点包含额外参数：
+- `encoder_momentum.*` - 动量编码器参数
+- `cycle_projector_momentum.*` - 动量投影头参数  
+- `queue` - 特征队列
+- `queue_ptr` - 队列指针
+
+下游微调时**不需要这些参数**（仅用于预训练），直接加载会导致错误：
+```
+RuntimeError: Error(s) in loading state_dict for PAHCLModel:
+    Unexpected key(s): encoder_momentum.cnn.layers.0.weight, ...
+```
+
+### 解决方案 ✅
+
+已实现**智能加载机制**，自动处理 MoCo/SimCLR 预训练权重：
+
+#### 1. 自动检测和过滤
+
+`src/trainers/downstream_trainer.py` 中的 `load_pretrained_encoder` 函数：
+
+```python
+def load_pretrained_encoder(checkpoint_path, device, config=None, logger=None):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # 检测是否使用 MoCo（优先使用元数据）
+    if "moco_metadata" in checkpoint:
+        pretrain_used_moco = checkpoint["moco_metadata"]["use_moco"]
+    else:
+        # 回退：检查 state_dict 键
+        pretrain_used_moco = any('encoder_momentum' in k 
+                                 for k in checkpoint["model_state_dict"].keys())
+    
+    # 强制下游模型禁用 MoCo
+    config.model.use_moco = False
+    
+    # 过滤 MoCo 参数
+    if pretrain_used_moco:
+        filtered_state_dict = {
+            k: v for k, v in checkpoint["model_state_dict"].items()
+            if not any(moco_key in k for moco_key in 
+                      ['encoder_momentum', 'cycle_projector_momentum', 'queue', 'queue_ptr'])
+        }
+        model.load_state_dict(filtered_state_dict, strict=False)
+    else:
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+```
+
+#### 2. 检查点元数据
+
+预训练保存检查点时自动添加元数据：
+
+```python
+# src/trainers/pretrain_trainer.py
+checkpoint = {
+    "model_state_dict": ...,
+    "moco_metadata": {
+        "use_moco": True,
+        "moco_momentum": 0.999,
+        "queue_size": 8192,
+    }
+}
+```
+
+### 使用方法
+
+**无需任何额外配置**，下游微调会自动处理：
+
+```bash
+# SimCLR 预训练权重 → 下游微调 ✅
+python scripts/finetune.py \
+    --task circor_murmur \
+    --pretrained checkpoints/simclr_best.pt
+
+# MoCo 预训练权重 → 下游微调 ✅ (自动过滤)
+python scripts/finetune.py \
+    --task circor_murmur \
+    --pretrained checkpoints/moco_best.pt
+```
+
+**日志输出示例**：
+```
+加载预训练模型: checkpoints/moco_best.pt
+从检查点元数据检测到 MoCo: True
+  动量系数: 0.999
+  队列大小: 8192
+下游任务不需要 MoCo 动量编码器，已自动禁用
+已跳过 234 个 MoCo 相关参数（动量编码器/队列）
+成功加载 512 个主模型参数
+编码器维度: 256
+```
+
+### 兼容性矩阵
+
+| 预训练模式 | 下游微调 | 状态 | 说明 |
+|-----------|---------|------|------|
+| SimCLR (`use_moco=false`) | ✅ | 正常 | 直接加载，严格模式 |
+| MoCo (`use_moco=true`) | ✅ | **自动处理** | 过滤动量参数 |
+| 旧版本检查点（无元数据） | ✅ | 兼容 | 通过键检测 |
+
+### 验证测试
+
+运行兼容性测试：
+
+```bash
+# 测试所有场景
+python tests/test_checkpoint_compatibility.py
+```
+
+测试覆盖：
+- ✅ 加载 SimCLR 检查点
+- ✅ 加载 MoCo 检查点  
+- ✅ SimCLR 权重下游微调
+- ✅ MoCo 权重下游微调
+- ✅ State dict 过滤逻辑
+- ✅ 编码器权重保留
+
+---
+
+**文档版本**: v1.1  
+**最后更新**: 2026-01-23  
 **作者**: PA-HCL Team  

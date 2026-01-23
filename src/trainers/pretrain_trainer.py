@@ -642,8 +642,17 @@ class PretrainTrainer:
         # Get model state dict (handle DDP)
         if isinstance(self.model, DDP):
             model_state = self.model.module.state_dict()
+            model_ref = self.model.module
         else:
             model_state = self.model.state_dict()
+            model_ref = self.model
+        
+        # 建议A: 添加 MoCo 元数据
+        moco_metadata = {
+            "use_moco": getattr(model_ref, 'use_moco', False),
+            "moco_momentum": getattr(model_ref, 'moco_momentum', 0.999),
+            "queue_size": getattr(model_ref, 'queue_size', 0),
+        }
         
         checkpoint = {
             "epoch": self.current_epoch,
@@ -653,6 +662,7 @@ class PretrainTrainer:
             "scheduler_state_dict": self.scheduler.state_dict(),
             "best_val_loss": self.best_val_loss,
             "config": self.config,
+            "moco_metadata": moco_metadata,  # 建议A: MoCo 元数据
         }
         
         if self.scaler is not None:
@@ -660,6 +670,8 @@ class PretrainTrainer:
         
         torch.save(checkpoint, checkpoint_path)
         self.logger.info(f"Checkpoint saved: {checkpoint_path}")
+        if moco_metadata["use_moco"]:
+            self.logger.info(f"  MoCo enabled: momentum={moco_metadata['moco_momentum']}, queue_size={moco_metadata['queue_size']}")
     
     def load_checkpoint(self, checkpoint_path: str):
         """
