@@ -1,0 +1,129 @@
+# PA-HCL 监督学习基线配置
+# ==================================
+# 用于从零训练（不使用预训练权重）验证编码器架构的有效性
+# 
+# 用法:
+#   # 测试 CNN-Mamba 编码器
+#   python scripts/train_supervised_baseline.py --task physionet2016
+#   
+#   # 测试 CNN-only 编码器
+#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_only
+#   
+#   # 测试 CNN-Transformer 编码器
+#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_transformer
+
+experiment:
+  name: "supervised_baseline"
+  description: "从零训练的监督学习基线，用于验证编码器设计"
+
+# 任务设置 (被 --task 参数覆盖)
+task:
+  name: "physionet2016"
+  type: "classification"
+
+# 数据设置
+data:
+  base_dir: "/root/autodl-tmp/data/downstream"     # 下游任务数据根目录
+  raw_dir: "/root/autodl-tmp/data/raw"             # 原始数据目录
+  processed_dir: "/root/autodl-tmp/data/processed" # 预处理数据目录
+  sample_rate: 5000
+  target_length: 4000
+  num_substructures: 4
+
+# 模型架构配置
+model:
+  # 编码器类型: cnn_only, cnn_transformer, cnn_mamba
+  encoder_type: "cnn_mamba"
+  
+  # CNN 配置
+  cnn_channels: [32, 64, 128, 256]
+  cnn_kernel_sizes: [7, 5, 5, 3]
+  cnn_strides: [2, 2, 2, 2]
+  
+  # Mamba 配置 (当 encoder_type="cnn_mamba" 时使用)
+  mamba_d_model: 256
+  mamba_n_layers: 4
+  mamba_d_state: 16
+  mamba_d_conv: 4
+  mamba_expand_factor: 2
+  
+  # Transformer 配置 (当 encoder_type="cnn_transformer" 时使用)
+  transformer_n_layers: 4
+  transformer_n_heads: 8
+  transformer_d_ff: 1024
+  transformer_dropout: 0.1
+
+# 分类器设置
+classifier:
+  hidden_dim: 128  # 设为 null 以使用线性分类器
+  dropout: 0.3
+
+# 训练设置
+training:
+  # 基础参数
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 1e-3
+  weight_decay: 1e-4
+  
+  # 学习率调度
+  warmup_epochs: 10
+  min_lr: 1e-7
+  scheduler: "cosine"  # cosine 或 plateau
+  
+  # 正则化
+  label_smoothing: 0.1
+  use_class_weights: true
+  grad_clip_norm: 1.0
+  
+  # 早停
+  early_stopping_patience: 20
+  
+  # 混合精度训练
+  use_amp: true
+  
+  # 数据加载
+  num_workers: 4
+  pin_memory: true
+  
+  # 日志和保存
+  log_interval: 20
+  save_interval: 10
+  save_best_only: false
+
+# 评估设置
+evaluation:
+  primary_metric: "auroc"  # 主要评估指标: auroc, f1_macro, accuracy
+  metrics:
+    - accuracy
+    - f1
+    - f1_macro
+    - auroc
+    - auprc
+    - precision
+    - recall
+    - specificity
+  save_confusion_matrix: true
+  save_predictions: true
+
+# 优化器设置
+optimizer:
+  type: "adamw"  # adamw 或 sgd
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  momentum: 0.9  # 用于 SGD
+
+# 实验跟踪
+tracking:
+  use_wandb: false
+  wandb_project: "PA-HCL-Supervised"
+  wandb_entity: null
+  use_tensorboard: true
+  save_model_summary: true
+
+# 可复现性
+seed: 42
+
+# 设备设置
+device: "cuda"  # cuda 或 cpu
+distributed: false

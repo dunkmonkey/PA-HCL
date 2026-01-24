@@ -26,12 +26,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 # 实验监控工具（可选依赖）
 try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_AVAILABLE = True
-except ImportError:
-    TENSORBOARD_AVAILABLE = False
-
-try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
@@ -173,7 +167,6 @@ class DownstreamTrainer:
         task_name: str = "default",
         primary_metric: str = "f1",
         # Experiment tracking
-        use_tensorboard: bool = False,
         use_wandb: bool = False,
         wandb_project: str = "PA-HCL",
         wandb_entity: Optional[str] = None,
@@ -211,21 +204,10 @@ class DownstreamTrainer:
         )
         
         # 实验监控工具
-        self.use_tensorboard = use_tensorboard
         self.use_wandb = use_wandb
-        self.tensorboard_writer = None
-        
-        # 初始化 TensorBoard
-        if use_tensorboard and self.is_main_process:
-            if TENSORBOARD_AVAILABLE:
-                tb_dir = self.output_dir / "tensorboard"
-                tb_dir.mkdir(parents=True, exist_ok=True)
-                self.tensorboard_writer = SummaryWriter(log_dir=str(tb_dir))
-                self.logger.info(f"TensorBoard 日志目录: {tb_dir}")
-            else:
-                self.logger.warning("TensorBoard 不可用。请安装: pip install tensorboard")
-                self.use_tensorboard = False
-        
+        self.wandb_project = wandb_project
+        self.wandb_entity = wandb_entity
+
         # 初始化 WandB
         if use_wandb and self.is_main_process:
             if WANDB_AVAILABLE:
@@ -280,8 +262,8 @@ class DownstreamTrainer:
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Seed
-        set_seed(seed)
+        # Seed (禁用确定性模式以提升性能)
+        set_seed(seed, deterministic=False)
         
         # Model
         self.model = model.to(self.device)
@@ -414,10 +396,6 @@ class DownstreamTrainer:
         
         # 关闭监控工具
         if self.is_main_process:
-            if self.use_tensorboard and self.tensorboard_writer is not None:
-                self.tensorboard_writer.close()
-                self.logger.info("TensorBoard writer 已关闭")
-            
             if self.use_wandb:
                 # 记录最终测试结果
                 final_metrics = test_metrics if test_metrics else val_metrics
@@ -434,6 +412,7 @@ class DownstreamTrainer:
         total_loss = 0.0
         all_preds = []
         all_labels = []
+        all_probs = []  # 添加概率收集
         
         for batch_idx, batch in enumerate(self.train_loader):
             # Get data
@@ -463,9 +442,12 @@ class DownstreamTrainer:
             
             # Accumulate
             total_loss += loss.item()
-            preds = logits.argmax(dim=-1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            with torch.no_grad():
+                probs = F.softmax(logits, dim=-1)
+                preds = logits.argmax(dim=-1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
             
             # Logging
             if self.is_main_process and (batch_idx + 1) % self.log_interval == 0:
@@ -476,19 +458,15 @@ class DownstreamTrainer:
                 )
         
         # Compute metrics
-        metrics = compute_classification_metrics(all_labels, all_preds)
+        metrics = compute_classification_metrics(
+            np.array(all_labels), 
+            np.array(all_preds),
+            np.array(all_probs)  # 传递概率
+        )
         metrics["train_loss"] = total_loss / len(self.train_loader)
         
         # 记录训练指标
         if self.is_main_process:
-            # TensorBoard
-            if self.use_tensorboard and self.tensorboard_writer is not None:
-                for key, value in metrics.items():
-                    self.tensorboard_writer.add_scalar(f"train/{key}", value, self.current_epoch)
-                # 记录学习率
-                for i, param_group in enumerate(self.optimizer.param_groups):
-                    self.tensorboard_writer.add_scalar(f"lr/group_{i}", param_group['lr'], self.current_epoch)
-            
             # WandB
             if self.use_wandb:
                 wandb_metrics = {f"train/{k}": v for k, v in metrics.items()}
@@ -535,10 +513,23 @@ class DownstreamTrainer:
             all_probs.extend(probs.cpu().numpy())
         
         # Compute metrics
+        all_labels_array = np.array(all_labels)
+        all_preds_array = np.array(all_preds)
+        all_probs_array = np.array(all_probs)
+        
+        # 调试信息
+        if self.is_main_process and prefix == "test":
+            self.logger.info(f"评估数据统计:")
+            self.logger.info(f"  样本数: {len(all_labels_array)}")
+            self.logger.info(f"  标签范围: {all_labels_array.min()} - {all_labels_array.max()}")
+            self.logger.info(f"  唯一标签: {np.unique(all_labels_array)}")
+            self.logger.info(f"  概率形状: {all_probs_array.shape}")
+            self.logger.info(f"  概率范围: {all_probs_array.min():.4f} - {all_probs_array.max():.4f}")
+        
         metrics = compute_classification_metrics(
-            all_labels,
-            all_preds,
-            all_probs
+            all_labels_array,
+            all_preds_array,
+            all_probs_array
         )
         metrics[f"{prefix}_loss"] = total_loss / len(data_loader)
         
@@ -547,13 +538,6 @@ class DownstreamTrainer:
         
         # 记录验证/测试指标
         if self.is_main_process:
-            # TensorBoard
-            if self.use_tensorboard and self.tensorboard_writer is not None:
-                for key, value in metrics.items():
-                    # 去掉前缀以获取干净的指标名
-                    clean_key = key.replace(f"{prefix}_", "")
-                    self.tensorboard_writer.add_scalar(f"{prefix}/{clean_key}", value, self.current_epoch)
-            
             # WandB
             if self.use_wandb:
                 wandb_metrics = {k: v for k, v in metrics.items()}

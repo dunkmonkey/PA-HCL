@@ -39,21 +39,30 @@ def compute_auroc(
     y_true = np.asarray(y_true)
     y_score = np.asarray(y_score)
     
+    # 检查是否只有一个类别
+    unique_classes = np.unique(y_true)
+    if len(unique_classes) < 2:
+        # 只有一个类别时无法计算AUROC
+        return 0.0
+    
     try:
         if len(y_score.shape) == 1 or y_score.shape[1] == 1:
-            # 二分类
+            # 二分类：使用正类概率
             return roc_auc_score(y_true, y_score.ravel())
         else:
-            # 多分类
-            return roc_auc_score(y_true, y_score, multi_class=multi_class)
-    except ValueError:
-        # 处理边界情况 (例如: 仅存在一个类别)
+            # 多分类：使用完整概率矩阵
+            return roc_auc_score(y_true, y_score, multi_class=multi_class, average='macro')
+    except (ValueError, IndexError) as e:
+        # 处理边界情况
+        import warnings
+        warnings.warn(f"AUROC计算失败: {str(e)}，返回0.0")
         return 0.0
 
 
 def compute_auprc(
     y_true: Union[np.ndarray, List],
-    y_score: Union[np.ndarray, List]
+    y_score: Union[np.ndarray, List],
+    num_classes: Optional[int] = None
 ) -> float:
     """
     计算精确率-召回率曲线下面积 (AUPRC)。
@@ -61,16 +70,29 @@ def compute_auprc(
     参数:
         y_true: 真实标签
         y_score: 预测分数/概率
+        num_classes: 类别数量（用于多分类）
         
     返回:
         AUPRC 分数
     """
     y_true = np.asarray(y_true)
-    y_score = np.asarray(y_score).ravel()
+    y_score = np.asarray(y_score)
+    
+    # 检查是否只有一个类别
+    unique_classes = np.unique(y_true)
+    if len(unique_classes) < 2:
+        return 0.0
     
     try:
-        return average_precision_score(y_true, y_score)
-    except ValueError:
+        if len(y_score.shape) == 1 or y_score.shape[1] == 1:
+            # 二分类：使用正类概率
+            return average_precision_score(y_true, y_score.ravel())
+        else:
+            # 多分类：计算macro平均
+            return average_precision_score(y_true, y_score, average='macro')
+    except (ValueError, IndexError) as e:
+        import warnings
+        warnings.warn(f"AUPRC计算失败: {str(e)}，返回0.0")
         return 0.0
 
 
@@ -131,9 +153,20 @@ def compute_metrics(
     # 基于分数的指标
     if y_score is not None:
         y_score = np.asarray(y_score)
-        metrics["auroc"] = compute_auroc(y_true, y_score)
-        if num_classes == 2:
-            metrics["auprc"] = compute_auprc(y_true, y_score)
+        
+        # 对于二分类，提取正类概率
+        if num_classes == 2 and len(y_score.shape) == 2 and y_score.shape[1] == 2:
+            y_score_binary = y_score[:, 1]  # 取正类概率
+            metrics["auroc"] = compute_auroc(y_true, y_score_binary)
+            metrics["auprc"] = compute_auprc(y_true, y_score_binary, num_classes)
+        else:
+            # 多分类或已经是正确格式
+            metrics["auroc"] = compute_auroc(y_true, y_score)
+            metrics["auprc"] = compute_auprc(y_true, y_score, num_classes)
+    else:
+        # 如果没有提供概率，设置为0.0（而不是完全不设置）
+        metrics["auroc"] = 0.0
+        metrics["auprc"] = 0.0
     
     return metrics
 

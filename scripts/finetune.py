@@ -192,11 +192,6 @@ def parse_args():
     # 实验监控
     tracking_group = parser.add_argument_group("实验监控")
     tracking_group.add_argument(
-        "--tensorboard",
-        action="store_true",
-        help="启用 TensorBoard 日志记录"
-    )
-    tracking_group.add_argument(
         "--wandb",
         action="store_true",
         help="启用 WandB 实验跟踪"
@@ -522,7 +517,6 @@ def main():
         seed=args.seed,
         task_name=task_name,
         primary_metric=primary_metric,
-        use_tensorboard=args.tensorboard,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,

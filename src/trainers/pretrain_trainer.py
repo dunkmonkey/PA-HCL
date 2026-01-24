@@ -10,7 +10,7 @@ PA-HCL 预训练的训练器。
 - 梯度累积
 - 学习率调度
 - 检查点和恢复
-- 日志记录 (TensorBoard, WandB)
+- 日志记录 (WandB)
 
 作者: PA-HCL Team
 """
@@ -27,7 +27,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.tensorboard import SummaryWriter
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -147,9 +146,6 @@ class PretrainTrainer:
             log_file=self.output_dir / "train.log"
         )
         
-        # Set up TensorBoard
-        self.writer = SummaryWriter(log_dir=str(self.output_dir)) if self.is_main_process else None
-        
         # Device setup
         if distributed:
             self.device = torch.device(f"cuda:{local_rank}")
@@ -157,8 +153,8 @@ class PretrainTrainer:
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Set seed
-        set_seed(seed)
+        # Set seed (禁用确定性模式以提升性能)
+        set_seed(seed, deterministic=False)
         
         # Model setup
         self.model = model.to(self.device)
@@ -308,8 +304,6 @@ class PretrainTrainer:
                 project=self.wandb_project,
                 name=self.experiment_name,
                 config=wandb_config,
-                # 设置同步tensorboard
-                sync_tensorboard=True,
             )
             
             # 记录模型架构
@@ -365,10 +359,6 @@ class PretrainTrainer:
         # Save final model
         if self.is_main_process:
             self.save_checkpoint("final_model.pt")
-        
-        # Close TensorBoard writer
-        if self.writer is not None:
-            self.writer.close()
         
         return train_metrics
     
@@ -586,20 +576,6 @@ class PretrainTrainer:
                 f"(cycle: {val_metrics['val_loss_cycle']:.4f}, "
                 f"sub: {val_metrics['val_loss_sub']:.4f})"
             )
-        
-        # TensorBoard logging
-        if self.writer is not None:
-            # 使用 global_step 作为 x 轴以获得更好的可视化效果
-            for k, v in train_metrics.items():
-                if k != 'epoch_time':  # 跳过非损失指标
-                    self.writer.add_scalar(f"train/{k}", v, self.global_step)
-            for k, v in val_metrics.items():
-                self.writer.add_scalar(f"val/{k}", v, self.global_step)
-            # 记录学习率和 epoch
-            self.writer.add_scalar("lr", self.optimizer.param_groups[0]['lr'], self.global_step)
-            self.writer.add_scalar("epoch", self.current_epoch + 1, self.global_step)
-            # 确保数据写入磁盘
-            self.writer.flush()
         
         # W&B logging
         if self.use_wandb:
