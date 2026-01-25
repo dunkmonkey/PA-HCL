@@ -50,8 +50,8 @@ from torch.utils.data import DataLoader
 from src.config import load_config, print_config
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
-from src.data.dataset import HeartSoundDataset
-from src.models.encoder import Encoder
+from src.data.dataset import PCGDownstreamDataset
+from src.models.encoder import build_encoder
 from src.models.heads import ClassificationHead
 
 
@@ -91,6 +91,7 @@ class SupervisedModel(nn.Module):
         super().__init__()
         
         self.encoder = encoder
+        self.freeze_encoder = False  # 监督学习不冻结编码器
         self.classifier = ClassificationHead(
             input_dim=encoder_dim,
             num_classes=num_classes,
@@ -207,6 +208,11 @@ def parse_args():
         default=42,
         help="随机种子"
     )
+    override_group.add_argument(
+        "--no-deterministic",
+        action="store_true",
+        help="禁用确定性模式以提升训练速度（可能影响结果可重现性）"
+    )
     
     # 数据
     data_group = parser.add_argument_group("数据设置")
@@ -254,7 +260,7 @@ def parse_args():
 
 def load_task_config(args):
     """加载任务配置。"""
-    from types import SimpleNamespace
+    from omegaconf import OmegaConf
     
     # 加载基础配置
     config = load_config(args.config)
@@ -264,19 +270,8 @@ def load_task_config(args):
     if task_config_path.exists():
         task_config = load_config(str(task_config_path))
         
-        # 合并配置（任务配置优先）
-        if hasattr(task_config, 'classification'):
-            if not hasattr(config, 'classification'):
-                config.classification = SimpleNamespace()
-            for key, value in vars(task_config.classification).items():
-                setattr(config.classification, key, value)
-        
-        if hasattr(task_config, 'data'):
-            for key, value in vars(task_config.data).items():
-                setattr(config.data, key, value)
-        
-        if hasattr(task_config, 'task'):
-            config.task = task_config.task
+        # 使用 OmegaConf.merge 合并配置（任务配置优先）
+        config = OmegaConf.merge(config, task_config)
     
     return config
 
@@ -300,25 +295,31 @@ def create_dataloaders(config, args, logger):
     logger.info(f"加载训练数据: {train_csv}")
     logger.info(f"加载验证数据: {val_csv}")
     
-    # 创建数据集
-    train_dataset = HeartSoundDataset(
-        csv_file=str(train_csv),
+    # 创建数据集（启用内存缓存）
+    train_dataset = PCGDownstreamDataset(
+        data_dir=data_dir,
+        csv_path=train_csv,
         sample_rate=config.data.sample_rate,
         target_length=config.data.target_length,
-        augment=True,  # 训练时数据增强
+        mode='train',
+        cache_in_memory=True,
     )
     
-    val_dataset = HeartSoundDataset(
-        csv_file=str(val_csv),
+    val_dataset = PCGDownstreamDataset(
+        data_dir=data_dir,
+        csv_path=val_csv,
         sample_rate=config.data.sample_rate,
         target_length=config.data.target_length,
-        augment=False,  # 验证时不增强
+        mode='val',
+        cache_in_memory=True,
     )
     
     logger.info(f"训练样本数: {len(train_dataset)}")
     logger.info(f"验证样本数: {len(val_dataset)}")
     
-    # 创建数据加载器
+    # 创建数据加载器（优化配置）
+    use_persistent = args.num_workers > 0
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
@@ -326,6 +327,8 @@ def create_dataloaders(config, args, logger):
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
+        prefetch_factor=4 if args.num_workers > 0 else None,
+        persistent_workers=use_persistent,
     )
     
     val_loader = DataLoader(
@@ -334,6 +337,8 @@ def create_dataloaders(config, args, logger):
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
+        prefetch_factor=4 if args.num_workers > 0 else None,
+        persistent_workers=use_persistent,
     )
     
     return train_loader, val_loader, train_dataset, val_dataset
@@ -348,21 +353,43 @@ def create_model(config, num_classes, logger):
     # 创建编码器（从零初始化）
     logger.info(f"编码器类型: {config.model.encoder_type}")
     
-    encoder = Encoder(
-        input_channels=1,
+    # 准备编码器参数
+    encoder_kwargs = {
+        'in_channels': 1,
+    }
+    
+    # 根据编码器类型添加特定参数
+    if config.model.encoder_type == "cnn_only":
+        encoder_kwargs.update({
+            'channels': config.model.cnn_channels,
+            'kernel_sizes': config.model.cnn_kernel_sizes,
+            'strides': config.model.cnn_strides,
+        })
+    elif config.model.encoder_type == "cnn_mamba":
+        encoder_kwargs.update({
+            'cnn_channels': config.model.cnn_channels,
+            'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
+            'cnn_strides': config.model.cnn_strides,
+            'mamba_d_model': getattr(config.model, 'mamba_d_model', 256),
+            'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 4),
+            'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
+            'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
+        })
+    elif config.model.encoder_type == "cnn_transformer":
+        encoder_kwargs.update({
+            'cnn_channels': config.model.cnn_channels,
+            'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
+            'cnn_strides': config.model.cnn_strides,
+            'transformer_d_model': getattr(config.model, 'mamba_d_model', 256),  # 使用相同的维度
+            'transformer_n_layers': getattr(config.model, 'transformer_n_layers', 4),
+            'transformer_n_heads': getattr(config.model, 'transformer_n_heads', 8),
+            'transformer_d_ff': getattr(config.model, 'transformer_d_ff', 1024),
+            'transformer_dropout': getattr(config.model, 'transformer_dropout', 0.1),
+        })
+    
+    encoder = build_encoder(
         encoder_type=config.model.encoder_type,
-        cnn_channels=config.model.cnn_channels,
-        cnn_kernel_sizes=config.model.cnn_kernel_sizes,
-        cnn_strides=config.model.cnn_strides,
-        mamba_d_model=getattr(config.model, 'mamba_d_model', 256),
-        mamba_n_layers=getattr(config.model, 'mamba_n_layers', 4),
-        mamba_d_state=getattr(config.model, 'mamba_d_state', 16),
-        mamba_d_conv=getattr(config.model, 'mamba_d_conv', 4),
-        mamba_expand_factor=getattr(config.model, 'mamba_expand_factor', 2),
-        transformer_n_layers=getattr(config.model, 'transformer_n_layers', 4),
-        transformer_n_heads=getattr(config.model, 'transformer_n_heads', 8),
-        transformer_d_ff=getattr(config.model, 'transformer_d_ff', 1024),
-        transformer_dropout=getattr(config.model, 'transformer_dropout', 0.1),
+        **encoder_kwargs
     )
     
     # 获取编码器输出维度
@@ -396,7 +423,10 @@ def main():
     args = parse_args()
     
     # 设置随机种子
-    set_seed(args.seed)
+    # 默认开启确定性模式以确保结果可重现，但会降低训练速度
+    # 使用 --no-deterministic 参数可以禁用确定性模式以提升速度
+    deterministic = not args.no_deterministic
+    set_seed(args.seed, deterministic=deterministic)
     
     # 加载配置
     config = load_task_config(args)
@@ -434,15 +464,21 @@ def main():
     logger.info(f"编码器类型: {config.model.encoder_type}")
     logger.info(f"输出目录: {output_dir}")
     logger.info(f"随机种子: {args.seed}")
+    logger.info(f"确定性模式: {'启用' if deterministic else '禁用'}")
+    if deterministic:
+        logger.warning(
+            "确定性模式已启用以确保结果可重现，但会显著降低训练速度。\n"
+            "如需提升速度，可使用 --no-deterministic 参数禁用确定性模式。"
+        )
     
     # 打印配置
-    print_config(config, logger)
+    print_config(config)
     
     # 保存配置
+    from omegaconf import OmegaConf
     config_save_path = output_dir / "config.yaml"
-    import yaml
     with open(config_save_path, 'w') as f:
-        yaml.dump(vars(config), f, default_flow_style=False)
+        OmegaConf.save(config, f)
     logger.info(f"配置已保存到: {config_save_path}")
     
     # 创建数据加载器
@@ -473,13 +509,10 @@ def main():
         val_loader=val_loader,
         config=config,
         output_dir=output_dir,
-        logger=logger,
-        device=device,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         experiment_name=args.experiment_name,
-        use_tensorboard=args.tensorboard,
     )
     
     # 开始训练
@@ -498,13 +531,14 @@ def main():
             logger.info(f"  {metric_name}: {metric_value:.4f}")
         
         # 保存最终结果
+        from omegaconf import OmegaConf
         results = {
             "task": args.task,
             "encoder_type": config.model.encoder_type,
             "experiment_name": args.experiment_name,
             "seed": args.seed,
             "best_metrics": best_metrics,
-            "config": vars(config),
+            "config": OmegaConf.to_container(config, resolve=True),
         }
         
         results_path = output_dir / "results.json"

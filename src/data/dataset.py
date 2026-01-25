@@ -71,7 +71,9 @@ class PCGPretrainDataset(Dataset):
         target_length: int = 4000,
         transform: Optional[Compose] = None,
         augmentation_config: Optional[Dict] = None,
-        cache_in_memory: bool = False
+        cache_in_memory: bool = True,
+        use_gpu_augment: bool = False,
+        view_cache_refresh_epochs: int = 5
     ):
         """
         初始化预训练数据集。
@@ -84,7 +86,9 @@ class PCGPretrainDataset(Dataset):
             target_length: 每个周期的目标长度（样本数）
             transform: 增强管道。如果为 None，则使用默认的预训练变换
             augmentation_config: 增强配置
-            cache_in_memory: 是否将所有数据缓存在内存中（更快但占用更多 RAM）
+            cache_in_memory: 是否将所有数据缓存在内存中（默认 True，更快但占用更多 RAM）
+            use_gpu_augment: 是否使用 GPU 增强（如果为 True，__getitem__ 返回原始数据，增强在 GPU 上进行）
+            view_cache_refresh_epochs: 视图缓存刷新间隔（每 N 个 epoch 刷新预计算的增强视图）
         """
         self.data_dir = Path(data_dir)
         self.split = split
@@ -105,10 +109,18 @@ class PCGPretrainDataset(Dataset):
         if len(self.cycle_files) == 0:
             raise ValueError(f"No cycle files found in {data_dir}")
         
+        # GPU augmentation mode
+        self.use_gpu_augment = use_gpu_augment
+        self.view_cache_refresh_epochs = view_cache_refresh_epochs
+        
         # Optional: cache data in memory
         self.cache = {}
         if cache_in_memory:
             self._load_all_to_memory()
+        
+        # View cache for precomputed augmented views
+        self.view_cache: Dict[int, Tuple[np.ndarray, np.ndarray, List, List]] = {}
+        self.current_cache_epoch: int = -1
     
     def _collect_cycle_files(self) -> List[Path]:
         """
@@ -181,6 +193,63 @@ class PCGPretrainDataset(Dataset):
         """返回数据集中心动周期的数量。"""
         return len(self.cycle_files)
     
+    def refresh_view_cache(self, epoch: int, force: bool = False) -> None:
+        """
+        刷新预计算的视图缓存。
+        
+        每 view_cache_refresh_epochs 个 epoch 重新预计算增强视图，
+        以在训练效率和增强随机性之间取得平衡。
+        
+        参数:
+            epoch: 当前 epoch 数
+            force: 是否强制刷新（忽略刷新间隔）
+        """
+        # 检查是否需要刷新
+        should_refresh = (
+            force or 
+            self.current_cache_epoch < 0 or
+            (epoch - self.current_cache_epoch) >= self.view_cache_refresh_epochs
+        )
+        
+        if not should_refresh:
+            return
+        
+        # 如果使用 GPU 增强，不需要预计算视图缓存
+        if self.use_gpu_augment:
+            self.current_cache_epoch = epoch
+            return
+        
+        print(f"Refreshing view cache at epoch {epoch}...")
+        self.view_cache.clear()
+        
+        for idx in range(len(self.cycle_files)):
+            # 获取原始周期
+            if self.cache_in_memory and idx in self.cache:
+                cycle = self.cache[idx].copy()
+            else:
+                cycle = self._load_cycle(self.cycle_files[idx])
+            
+            # 生成两个增强视图
+            view1 = self.transform(cycle.copy(), self.sample_rate)
+            view2 = self.transform(cycle.copy(), self.sample_rate)
+            
+            # 提取子结构
+            subs1 = split_substructures(view1, self.num_substructures)
+            subs2 = split_substructures(view2, self.num_substructures)
+            
+            self.view_cache[idx] = (view1, view2, subs1, subs2)
+            
+            if (idx + 1) % 1000 == 0:
+                print(f"  Cached {idx + 1}/{len(self.cycle_files)} views")
+        
+        self.current_cache_epoch = epoch
+        print(f"View cache refreshed: {len(self.view_cache)} samples cached.")
+    
+    def clear_view_cache(self) -> None:
+        """清空视图缓存以释放内存。"""
+        self.view_cache.clear()
+        self.current_cache_epoch = -1
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         获取带有两个增强视图的训练样本。
@@ -192,13 +261,51 @@ class PCGPretrainDataset(Dataset):
             包含以下内容的字典:
             - view1: 周期的第一个增强视图 [1, T]
             - view2: 周期的第二个增强视图 [1, T]
-            - subs1: view1 的子结构 [K, T/K]
-            - subs2: view2 的子结构 [K, T/K]
+            - subs1: view1 的子结构 [K, T/K] (如果不使用 GPU 增强)
+            - subs2: view2 的子结构 [K, T/K] (如果不使用 GPU 增强)
             - idx: 样本索引（用于调试）
         """
-        # Load cycle (from cache or disk)
+        # GPU 增强模式: 只返回原始周期数据，增强在 GPU 上批量进行
+        if self.use_gpu_augment:
+            # 从缓存或磁盘加载原始周期
+            if self.cache_in_memory and idx in self.cache:
+                cycle = self.cache[idx].copy()
+            else:
+                cycle = self._load_cycle(self.cycle_files[idx])
+            
+            # 转为张量 [1, T]
+            cycle_tensor = torch.from_numpy(cycle).float().unsqueeze(0)
+            
+            # 返回原始周期（GPU 增强将在训练循环中应用）
+            return {
+                "view1": cycle_tensor,
+                "view2": cycle_tensor.clone(),  # 复制用于独立增强
+                "subs1": None,  # GPU 增强后再分割
+                "subs2": None,
+                "idx": idx
+            }
+        
+        # 优先从视图缓存读取
+        if idx in self.view_cache:
+            view1, view2, subs1, subs2 = self.view_cache[idx]
+            
+            # 转换为张量
+            view1_tensor = torch.from_numpy(view1).float().unsqueeze(0)
+            view2_tensor = torch.from_numpy(view2).float().unsqueeze(0)
+            subs1_tensor = torch.stack([torch.from_numpy(s).float() for s in subs1])
+            subs2_tensor = torch.stack([torch.from_numpy(s).float() for s in subs2])
+            
+            return {
+                "view1": view1_tensor,
+                "view2": view2_tensor,
+                "subs1": subs1_tensor,
+                "subs2": subs2_tensor,
+                "idx": idx
+            }
+        
+        # 回退: 从缓存或磁盘加载并实时增强
         if self.cache_in_memory and idx in self.cache:
-            cycle = self.cache[idx].copy()  # Copy to avoid modifying cache
+            cycle = self.cache[idx].copy()
         else:
             cycle = self._load_cycle(self.cycle_files[idx])
         
@@ -295,7 +402,10 @@ class PCGDownstreamDataset(Dataset):
         label_map: Optional[Dict[str, int]] = None,
         task_config: Optional[Dict] = None,
         # 兼容旧参数名
-        labels_file: Optional[Union[str, Path]] = None
+        labels_file: Optional[Union[str, Path]] = None,
+        # 性能优化参数
+        cache_in_memory: bool = True,
+        use_gpu_augment: bool = False
     ):
         """
         初始化下游数据集。
@@ -311,6 +421,8 @@ class PCGDownstreamDataset(Dataset):
             label_map: 从标签字符串到整数的映射
             task_config: 任务配置字典（从 task_config.json 加载）
             labels_file: 兼容旧参数名，等同于 csv_path
+            cache_in_memory: 是否将所有信号缓存在内存中（默认 True）
+            use_gpu_augment: 是否使用 GPU 增强（如果为 True，__getitem__ 返回原始数据）
         """
         self.data_dir = Path(data_dir)
         self.sample_rate = sample_rate
@@ -320,6 +432,8 @@ class PCGDownstreamDataset(Dataset):
         self.mode = mode
         self._class_weights = None
         self.task_config = task_config
+        self.cache_in_memory = cache_in_memory
+        self.use_gpu_augment = use_gpu_augment
         
         # 兼容旧参数名
         if csv_path is None and labels_file is not None:
@@ -359,6 +473,11 @@ class PCGDownstreamDataset(Dataset):
         self.reverse_label_map = {v: k for k, v in self.label_map.items()}
         
         self.num_classes = len(self.label_map)
+        
+        # 内存缓存
+        self.signal_cache: Dict[int, np.ndarray] = {}
+        if cache_in_memory:
+            self._load_all_signals_to_memory()
     
     def _load_samples(
         self,
@@ -441,6 +560,19 @@ class PCGDownstreamDataset(Dataset):
         unique_labels = sorted(set(label for _, label, *_ in self.samples))
         return {label: idx for idx, label in enumerate(unique_labels)}
     
+    def _load_all_signals_to_memory(self) -> None:
+        """将所有信号加载到内存以加快访问速度。"""
+        print(f"Loading {len(self.samples)} signals into memory...")
+        for idx in range(len(self.samples)):
+            file_path = self.samples[idx][0]
+            try:
+                self.signal_cache[idx] = self._load_signal(file_path)
+            except Exception as e:
+                print(f"  Warning: Failed to load {file_path}: {e}")
+            if (idx + 1) % 500 == 0:
+                print(f"  Loaded {idx + 1}/{len(self.samples)} signals")
+        print(f"Done loading {len(self.signal_cache)} signals into memory.")
+    
     def _load_signal(self, file_path: Path) -> np.ndarray:
         """加载和预处理信号文件。"""
         if file_path.suffix == ".wav":
@@ -491,11 +623,14 @@ class PCGDownstreamDataset(Dataset):
         label_str = sample[1]
         subject_id = sample[2] if len(sample) > 2 else ""
         
-        # Load signal
-        signal = self._load_signal(file_path)
+        # 从缓存或磁盘加载信号
+        if self.cache_in_memory and idx in self.signal_cache:
+            signal = self.signal_cache[idx].copy()
+        else:
+            signal = self._load_signal(file_path)
         
-        # Apply augmentation
-        if self.transform is not None:
+        # GPU 增强模式: 跳过 CPU 增强，增强在 GPU 上批量进行
+        if not self.use_gpu_augment and self.transform is not None:
             signal = self.transform(signal, self.sample_rate)
         
         # Convert to tensor
@@ -750,7 +885,9 @@ def create_dataloaders(
     pin_memory: bool = True,
     shuffle: bool = True,
     distributed: bool = False,
-    drop_last: Optional[bool] = None
+    drop_last: Optional[bool] = None,
+    prefetch_factor: int = 4,
+    persistent_workers: bool = True
 ) -> Union[DataLoader, Tuple[DataLoader, DataLoader, Optional[DataLoader]]]:
     """
     创建 DataLoader（支持单数据集或按索引划分）。
@@ -771,12 +908,18 @@ def create_dataloaders(
         shuffle: 是否打乱（单数据集模式生效）
         distributed: 是否使用分布式采样器
         drop_last: 是否丢弃不足一个 batch 的样本（若为 None，则按 shuffle 决定）
+        prefetch_factor: 每个 worker 预取的 batch 数（提高吞吐量）
+        persistent_workers: 是否保持 worker 进程存活（减少启动开销）
         
     返回:
         DataLoader 或 (train_loader, val_loader, test_loader)
     """
     from torch.utils.data import Subset
     from torch.utils.data.distributed import DistributedSampler
+    
+    # 计算是否启用 persistent_workers (需要 num_workers > 0)
+    use_persistent = persistent_workers and num_workers > 0
+    use_prefetch = num_workers > 0
     
     # 索引划分模式
     if train_indices is not None or val_indices is not None:
@@ -797,7 +940,9 @@ def create_dataloaders(
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
-            drop_last=True
+            drop_last=True,
+            prefetch_factor=prefetch_factor if use_prefetch else None,
+            persistent_workers=use_persistent
         )
         
         val_loader = DataLoader(
@@ -808,7 +953,9 @@ def create_dataloaders(
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
-            drop_last=False
+            drop_last=False,
+            prefetch_factor=prefetch_factor if use_prefetch else None,
+            persistent_workers=use_persistent
         )
         
         test_loader = None
@@ -823,7 +970,9 @@ def create_dataloaders(
                 num_workers=num_workers,
                 collate_fn=collate_fn,
                 pin_memory=pin_memory,
-                drop_last=False
+                drop_last=False,
+                prefetch_factor=prefetch_factor if use_prefetch else None,
+                persistent_workers=use_persistent
             )
         
         return train_loader, val_loader, test_loader
@@ -841,7 +990,9 @@ def create_dataloaders(
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
-        drop_last=drop_last
+        drop_last=drop_last,
+        prefetch_factor=prefetch_factor if use_prefetch else None,
+        persistent_workers=use_persistent
     )
 
 
@@ -853,6 +1004,8 @@ def create_task_dataloaders(
     batch_size: int = 32,
     num_workers: int = 4,
     pin_memory: bool = True,
+    prefetch_factor: int = 4,
+    persistent_workers: bool = True,
     **dataset_kwargs
 ) -> Dict[str, DataLoader]:
     """
@@ -869,6 +1022,8 @@ def create_task_dataloaders(
         batch_size: 批次大小
         num_workers: 数据加载工作进程数
         pin_memory: 是否锁定内存
+        prefetch_factor: 每个 worker 预取的 batch 数
+        persistent_workers: 是否保持 worker 进程存活
         **dataset_kwargs: 传递给 PCGDownstreamDataset 的额外参数
         
     返回:
@@ -892,6 +1047,10 @@ def create_task_dataloaders(
     if config_path.exists():
         with open(config_path, 'r') as f:
             task_config = json.load(f)
+    
+    # 计算是否启用优化选项
+    use_persistent = persistent_workers and num_workers > 0
+    use_prefetch = num_workers > 0
     
     result = {
         'task_name': task_name,
@@ -926,7 +1085,9 @@ def create_task_dataloaders(
             num_workers=num_workers,
             collate_fn=downstream_collate_fn,
             pin_memory=pin_memory,
-            drop_last=(split == "train")
+            drop_last=(split == "train"),
+            prefetch_factor=prefetch_factor if use_prefetch else None,
+            persistent_workers=use_persistent
         )
         
         result[split] = loader

@@ -23,6 +23,7 @@ from .preprocessing import (
     extract_cycles,
     split_substructures,
     split_substructures_with_overlap,
+    split_substructures_batch,  # GPU 批量版本
     # 质量评估
     compute_snr,
     assess_cycle_quality,
@@ -71,10 +72,30 @@ def __getattr__(name):
         'downstream_collate_fn',
         'create_subject_wise_split',
         'create_dataloaders',
+        'create_task_dataloaders',
+    }
+    
+    gpu_transforms = {
+        'GPUTransformBase',
+        'GPUTimeShift',
+        'GPUAmplitudeScale',
+        'GPUGaussianNoise',
+        'GPUTimeMask',
+        'GPUFrequencyMask',
+        'GPUTimeStretch',
+        'GPUCompose',
+        'GPURandomApply',
+        'GPUAugmentationWrapper',
+        'get_gpu_pretrain_transforms',
+        'get_gpu_downstream_transforms',
     }
     
     if name in torch_dependent:
         from . import dataset
         return getattr(dataset, name)
+    
+    if name in gpu_transforms:
+        from . import gpu_transforms
+        return getattr(gpu_transforms, name)
     
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

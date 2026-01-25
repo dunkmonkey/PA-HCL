@@ -188,6 +188,10 @@ class PretrainTrainer:
         # AMP scaler
         self.scaler = GradScaler() if use_amp else None
         
+        # GPU augmentation (optional, for faster training)
+        self.gpu_augment = None
+        self.use_gpu_augment = False
+        
         # Training state
         self.current_epoch = 0
         self.global_step = 0
@@ -199,6 +203,26 @@ class PretrainTrainer:
         
         self.logger.info(f"Trainer initialized. Device: {self.device}")
         self.logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    def enable_gpu_augment(self, augmentation_config: Optional[dict] = None, sample_rate: int = 5000):
+        """
+        启用 GPU 批量增强。
+        
+        这将数据增强从 CPU 移到 GPU，显著提升训练速度。
+        需要配合 use_gpu_augment=True 的数据集使用。
+        
+        参数:
+            augmentation_config: 增强配置字典（可选）
+            sample_rate: 采样率
+        """
+        from ..data.gpu_transforms import get_gpu_pretrain_transforms
+        
+        self.gpu_augment = get_gpu_pretrain_transforms(augmentation_config, sample_rate)
+        self.gpu_augment = self.gpu_augment.to(self.device)
+        self.gpu_augment.train()
+        self.use_gpu_augment = True
+        
+        self.logger.info("GPU augmentation enabled")
     
     @property
     def is_main_process(self) -> bool:
@@ -332,6 +356,14 @@ class PretrainTrainer:
         for epoch in range(self.current_epoch, self.num_epochs):
             self.current_epoch = epoch
             
+            # 刷新视图缓存（如果数据集支持）
+            train_dataset = self.train_loader.dataset
+            # 处理 Subset 包装
+            if hasattr(train_dataset, 'dataset'):
+                train_dataset = train_dataset.dataset
+            if hasattr(train_dataset, 'refresh_view_cache'):
+                train_dataset.refresh_view_cache(epoch)
+            
             # Training
             train_metrics = self.train_epoch()
             
@@ -380,15 +412,25 @@ class PretrainTrainer:
         
         for batch_idx, batch in enumerate(self.train_loader):
             # Move data to device
-            view1 = batch["view1"].to(self.device)
-            view2 = batch["view2"].to(self.device)
+            view1 = batch["view1"].to(self.device, non_blocking=True)
+            view2 = batch["view2"].to(self.device, non_blocking=True)
             subs1 = batch.get("subs1")
             subs2 = batch.get("subs2")
             
-            if subs1 is not None:
-                subs1 = subs1.to(self.device)
-            if subs2 is not None:
-                subs2 = subs2.to(self.device)
+            # 应用 GPU 增强（如果启用）
+            if self.use_gpu_augment and self.gpu_augment is not None:
+                view1 = self.gpu_augment(view1)
+                view2 = self.gpu_augment(view2)
+                # GPU 增强模式下，子结构在增强后分割
+                if subs1 is None or subs2 is None:
+                    from ..data.preprocessing import split_substructures_batch
+                    subs1 = split_substructures_batch(view1, num_substructures=4)
+                    subs2 = split_substructures_batch(view2, num_substructures=4)
+            
+            if subs1 is not None and not isinstance(subs1, torch.Tensor):
+                subs1 = subs1.to(self.device, non_blocking=True)
+            if subs2 is not None and not isinstance(subs2, torch.Tensor):
+                subs2 = subs2.to(self.device, non_blocking=True)
             
             # Forward pass with AMP
             with autocast(enabled=self.use_amp):

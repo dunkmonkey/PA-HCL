@@ -413,6 +413,7 @@ def main():
         
         # 创建新的训练集
         few_shot_dataset = Subset(base_dataset, selected_indices)
+        use_persistent = args.num_workers > 0
         train_loader = DataLoader(
             few_shot_dataset,
             batch_size=batch_size,
@@ -420,7 +421,9 @@ def main():
             num_workers=args.num_workers,
             collate_fn=downstream_collate_fn,
             pin_memory=True,
-            drop_last=True
+            drop_last=True,
+            prefetch_factor=4 if args.num_workers > 0 else None,
+            persistent_workers=use_persistent
         )
         
         logger.info(f"小样本训练: {len(few_shot_dataset)} 样本 ({args.shot_ratio*100:.1f}%)")

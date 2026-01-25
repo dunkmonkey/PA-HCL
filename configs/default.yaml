@@ -163,6 +163,14 @@ distributed:
 
 # ============== 硬件 ==============
 hardware:
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
   device: "cuda"
+
+# ============== 数据缓存 ==============
+data_cache:
+  cache_in_memory: true
+  view_cache_refresh_epochs: 5
+  use_gpu_augment: true

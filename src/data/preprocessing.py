@@ -659,6 +659,47 @@ def split_substructures_with_overlap(
     return substructures
 
 
+def split_substructures_batch(
+    cycles: "torch.Tensor",
+    num_substructures: int = 4
+) -> "torch.Tensor":
+    """
+    批量将心动周期分割为子结构（GPU 版本）。
+    
+    这是 split_substructures 的批量 PyTorch 实现，
+    用于在 GPU 增强模式下高效分割子结构。
+    
+    参数:
+        cycles: 心动周期张量 [B, C, T] 或 [B, T]
+        num_substructures: 子结构片段数量 (K)
+        
+    返回:
+        子结构张量 [B, K, T/K]
+    """
+    import torch
+    
+    if cycles.dim() == 2:
+        cycles = cycles.unsqueeze(1)
+    
+    B, C, T = cycles.shape
+    
+    # 确保 T 可以被 K 整除
+    sub_length = T // num_substructures
+    
+    # 截断到可整除长度
+    T_truncated = sub_length * num_substructures
+    cycles = cycles[:, :, :T_truncated]
+    
+    # 重塑为 [B, C, K, T/K]
+    substructures = cycles.view(B, C, num_substructures, sub_length)
+    
+    # 如果 C == 1，压缩通道维度，返回 [B, K, T/K]
+    if C == 1:
+        substructures = substructures.squeeze(1)
+    
+    return substructures
+
+
 # ============== Quality Assessment ==============
 
 def compute_snr(
