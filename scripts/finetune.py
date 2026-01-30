@@ -498,6 +498,14 @@ def main():
     logger.info(f"  使用类别权重: {use_class_weights}")
     logger.info(f"  主要指标: {primary_metric}")
     
+    # ============== GPU 增强配置 ==============
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
+    
+    if use_gpu_augment:
+        logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
+    
     # ============== 创建训练器 ==============
     trainer = DownstreamTrainer(
         model=model,
@@ -523,6 +531,7 @@ def main():
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        use_gpu_augment=use_gpu_augment,
     )
     
     # ============== 训练 ==============

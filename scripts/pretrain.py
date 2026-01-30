@@ -277,6 +277,24 @@ def main():
     if args.resume:
         trainer.load_checkpoint(args.resume)
     
+    # 启用 GPU 增强（如果配置中启用）
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
+    
+    if use_gpu_augment:
+        try:
+            augmentation_config = config.data.augmentation if hasattr(config.data, 'augmentation') else None
+            trainer.enable_gpu_augment(
+                augmentation_config=augmentation_config,
+                sample_rate=config.data.sample_rate
+            )
+            if is_main:
+                logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
+        except Exception as e:
+            if is_main:
+                logger.warning(f"无法启用 GPU 增强: {e}")
+    
     # 训练
     metrics = trainer.train()
     

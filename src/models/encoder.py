@@ -20,7 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .mamba import MambaEncoder, get_mamba_encoder
+from .mamba import MambaEncoder, get_mamba_encoder, get_mamba_encoder_v2, DropPath
+from .attention import get_attention_block
 
 
 # ============== CNN 主干 ==============
@@ -29,7 +30,7 @@ class ConvBlock(nn.Module):
     """
     带有 BatchNorm 和激活函数的基本一维卷积块。
     
-    结构: Conv1D -> BatchNorm -> Activation -> Dropout
+    结构: Conv1D -> BatchNorm -> Activation -> Dropout -> [可选 Attention]
     """
     
     def __init__(
@@ -40,7 +41,8 @@ class ConvBlock(nn.Module):
         stride: int = 2,
         padding: Optional[int] = None,
         dropout: float = 0.1,
-        activation: str = "gelu"
+        activation: str = "gelu",
+        attention_type: str = "none"
     ):
         """
         参数:
@@ -51,6 +53,7 @@ class ConvBlock(nn.Module):
             padding: 填充大小（如为 None 则自动计算）
             dropout: Dropout 率
             activation: 激活函数 ("relu", "gelu", "silu")
+            attention_type: 注意力类型 ("none", "eca", "se", "cbam")
         """
         super().__init__()
         
@@ -78,6 +81,9 @@ class ConvBlock(nn.Module):
             self.act = nn.SiLU(inplace=True)
         else:
             raise ValueError(f"Unknown activation: {activation}")
+        
+        # 注意力模块
+        self.attention = get_attention_block(attention_type, out_channels)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -91,6 +97,7 @@ class ConvBlock(nn.Module):
         x = self.bn(x)
         x = self.act(x)
         x = self.dropout(x)
+        x = self.attention(x)
         return x
 
 
@@ -99,8 +106,8 @@ class ResidualConvBlock(nn.Module):
     残差一维卷积块。
     
     结构:
-        x -> Conv -> BN -> Act -> Conv -> BN -> + -> Act -> output
-        |_____________________________________|
+        x -> Conv -> BN -> Act -> Conv -> BN -> DropPath -> + -> Act -> [可选 Attention] -> output
+        |_______________________________________________|
                     (1x1 conv if needed)
     """
     
@@ -110,7 +117,9 @@ class ResidualConvBlock(nn.Module):
         out_channels: int,
         kernel_size: int = 5,
         stride: int = 1,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        drop_path: float = 0.0,
+        attention_type: str = "none"
     ):
         """
         参数:
@@ -119,6 +128,8 @@ class ResidualConvBlock(nn.Module):
             kernel_size: 卷积核大小
             stride: 下采样步幅
             dropout: Dropout 率
+            drop_path: DropPath 率（随机深度）
+            attention_type: 注意力类型 ("none", "eca", "se", "cbam")
         """
         super().__init__()
         
@@ -140,6 +151,7 @@ class ResidualConvBlock(nn.Module):
         
         self.act = nn.GELU()
         self.dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         
         # 捷径连接 (Shortcut connection)
         if in_channels != out_channels or stride != 1:
@@ -149,6 +161,9 @@ class ResidualConvBlock(nn.Module):
             )
         else:
             self.shortcut = nn.Identity()
+        
+        # 注意力模块
+        self.attention = get_attention_block(attention_type, out_channels)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -168,8 +183,10 @@ class ResidualConvBlock(nn.Module):
         out = self.conv2(out)
         out = self.bn2(out)
         
+        out = self.drop_path(out)
         out = out + identity
         out = self.act(out)
+        out = self.attention(out)
         
         return out
 
@@ -184,7 +201,7 @@ class CNNBackbone(nn.Module):
     
     架构:
         输入 [B, 1, L] 
-        -> 随通道增加和下采样的卷积层
+        -> 随通道增加和下采样的卷积层（可选注意力）
         -> 输出 [B, C_out, L']
     
     中间层输出可用于子结构级对比学习。
@@ -197,7 +214,9 @@ class CNNBackbone(nn.Module):
         kernel_sizes: List[int] = [7, 5, 5, 3],
         strides: List[int] = [2, 2, 2, 2],
         dropout: float = 0.1,
-        use_residual: bool = True
+        drop_path_rate: float = 0.0,
+        use_residual: bool = True,
+        attention_type: str = "none"
     ):
         """
         参数:
@@ -206,13 +225,18 @@ class CNNBackbone(nn.Module):
             kernel_sizes: 每层的卷积核大小
             strides: 每层的步幅（决定下采样）
             dropout: Dropout 率
+            drop_path_rate: 最大 DropPath 率（线性递增）
             use_residual: 是否使用残差连接
+            attention_type: 注意力类型 ("none", "eca", "se", "cbam")
         """
         super().__init__()
         
         self.in_channels = in_channels
         self.channels = channels
         self.num_layers = len(channels)
+        
+        # 计算每层的 drop_path 率（线性递增）
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, len(channels))]
         
         # 构建卷积层
         layers = []
@@ -224,14 +248,17 @@ class CNNBackbone(nn.Module):
                     in_ch, out_ch,
                     kernel_size=k,
                     stride=s,
-                    dropout=dropout
+                    dropout=dropout,
+                    drop_path=dpr[i],
+                    attention_type=attention_type
                 ))
             else:
                 layers.append(ConvBlock(
                     in_ch, out_ch,
                     kernel_size=k,
                     stride=s,
-                    dropout=dropout
+                    dropout=dropout,
+                    attention_type=attention_type
                 ))
             in_ch = out_ch
         
@@ -299,16 +326,18 @@ class CNNMambaEncoder(nn.Module):
     用于心音表示的 CNN-Mamba 混合编码器。
     
     此架构结合了：
-    1. 用于局部多尺度特征提取的 CNN 主干网络
-    2. 用于高效长程依赖建模的 Mamba (SSM)
+    1. 用于局部多尺度特征提取的 CNN 主干网络（可选注意力）
+    2. 用于高效长程依赖建模的 Mamba (SSM)（支持双向）
     
     设计基本原理：
     - CNN 捕获具有平移等变性的局部模式（S1, S2, 杂音）
     - Mamba 高效地建模跨心动周期的随时间依赖关系
     - O(n) 的线性复杂度使其适用于长 PCG 信号
     
-    对于子结构级对比学习，可以提取中间 CNN 特征，
-    而周期级特征使用最终的 Mamba 输出。
+    新增特性：
+    - 通道注意力 (ECA/SE/CBAM)
+    - DropPath 正则化（随机深度）
+    - 双向 Mamba（可选）
     """
     
     def __init__(
@@ -326,7 +355,12 @@ class CNNMambaEncoder(nn.Module):
         mamba_expand: int = 2,
         mamba_dropout: float = 0.1,
         # 输出设置
-        pool_type: str = "mean"
+        pool_type: str = "mean",
+        # 新增：正则化和注意力
+        drop_path_rate: float = 0.0,
+        attention_type: str = "none",
+        use_bidirectional: bool = False,
+        bidirectional_fusion: str = "add"
     ):
         """
         参数:
@@ -341,18 +375,24 @@ class CNNMambaEncoder(nn.Module):
             mamba_expand: Mamba 扩展因子
             mamba_dropout: Mamba dropout 率
             pool_type: 最终输出的池化类型 ("mean", "max", "cls")
+            drop_path_rate: DropPath 率（随机深度正则化）
+            attention_type: 通道注意力类型 ("none", "eca", "se", "cbam")
+            use_bidirectional: 是否使用双向 Mamba
+            bidirectional_fusion: 双向融合方式 ("add", "concat", "gate")
         """
         super().__init__()
         
         self.pool_type = pool_type
         
-        # CNN backbone
+        # CNN backbone (支持注意力和 DropPath)
         self.cnn = CNNBackbone(
             in_channels=in_channels,
             channels=cnn_channels,
             kernel_sizes=cnn_kernel_sizes,
             strides=cnn_strides,
-            dropout=cnn_dropout
+            dropout=cnn_dropout,
+            drop_path_rate=drop_path_rate / 2,  # CNN 使用一半的 drop_path
+            attention_type=attention_type
         )
         
         # 如果需要，投影到 Mamba 维度
@@ -362,13 +402,16 @@ class CNNMambaEncoder(nn.Module):
         else:
             self.proj = nn.Identity()
         
-        # Mamba 编码器
-        self.mamba = get_mamba_encoder(
+        # Mamba 编码器 (使用 v2 版本支持更多选项)
+        self.mamba = get_mamba_encoder_v2(
             d_model=mamba_d_model,
             n_layers=mamba_n_layers,
             d_state=mamba_d_state,
             expand=mamba_expand,
             dropout=mamba_dropout,
+            drop_path_rate=drop_path_rate,
+            bidirectional=use_bidirectional,
+            fusion=bidirectional_fusion,
             use_official=False  # 为了兼容性使用纯 PyTorch
         )
         

@@ -34,6 +34,7 @@ except ImportError:
 
 from ..models.pahcl import PAHCLModel
 from ..models.heads import ClassificationHead
+from ..losses.focal import get_classification_loss
 from ..utils.seed import set_seed
 from ..utils.logging import setup_logger
 from ..utils.metrics import compute_classification_metrics
@@ -171,11 +172,24 @@ class DownstreamTrainer:
         use_wandb: bool = False,
         wandb_project: str = "PA-HCL",
         wandb_entity: Optional[str] = None,
+        # GPU 增强
+        use_gpu_augment: bool = False,
     ):
         """
         初始化下游训练器。
         """
         self.config = config
+        self.use_gpu_augment = use_gpu_augment
+        self.gpu_transform = None
+        
+        # 初始化 GPU 增强（仅训练时使用）
+        if use_gpu_augment:
+            try:
+                from ..data.gpu_transforms import get_gpu_downstream_transforms
+                self.gpu_transform = get_gpu_downstream_transforms()
+            except ImportError as e:
+                print(f"警告: 无法加载 GPU 增强模块: {e}")
+                self.use_gpu_augment = False
         self.num_epochs = num_epochs
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -282,10 +296,22 @@ class DownstreamTrainer:
         self.test_loader = test_loader
         
         # Loss function
-        self.criterion = nn.CrossEntropyLoss(
-            weight=class_weights.to(self.device) if class_weights is not None else None,
-            label_smoothing=label_smoothing
+        # 从配置中获取损失函数类型
+        loss_type = "ce"  # 默认使用交叉熵
+        focal_gamma = 2.0
+        if config is not None:
+            if hasattr(config, 'training'):
+                loss_type = getattr(config.training, 'loss_type', 'ce')
+                focal_gamma = getattr(config.training, 'focal_gamma', 2.0)
+        
+        self.criterion = get_classification_loss(
+            loss_type=loss_type,
+            num_classes=model.classifier.num_classes if hasattr(model, 'classifier') else 2,
+            class_weights=class_weights.to(self.device) if class_weights is not None else None,
+            gamma=focal_gamma,
+            label_smoothing=label_smoothing,
         )
+        self.logger.info(f"损失函数类型: {loss_type}" + (f" (gamma={focal_gamma})" if loss_type == "focal" else ""))
         
         # Optimizer (different lr for encoder and classifier if not frozen)
         self.optimizer = self._build_optimizer()
@@ -410,6 +436,10 @@ class DownstreamTrainer:
         """训练一个 epoch。"""
         self.model.train()
         
+        # 设置 GPU 增强为训练模式
+        if self.use_gpu_augment and self.gpu_transform is not None:
+            self.gpu_transform.train()
+        
         total_loss = 0.0
         all_preds = []
         all_labels = []
@@ -417,8 +447,12 @@ class DownstreamTrainer:
         
         for batch_idx, batch in enumerate(self.train_loader):
             # Get data
-            signals = batch["signal"].to(self.device)
-            labels = batch["label"].to(self.device)
+            signals = batch["signal"].to(self.device, non_blocking=True)
+            labels = batch["label"].to(self.device, non_blocking=True)
+            
+            # 应用 GPU 增强（仅训练时）
+            if self.use_gpu_augment and self.gpu_transform is not None:
+                signals = self.gpu_transform(signals)
             
             # Forward with AMP
             with autocast(enabled=self.use_amp):

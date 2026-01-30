@@ -52,17 +52,37 @@ model:
   transformer_n_heads: 8
   transformer_d_ff: 1024
   transformer_dropout: 0.1
+  
+  # ============== 新增：正则化和注意力 ==============
+  # 通道注意力: "none", "eca", "se", "cbam"
+  # - eca: 高效通道注意力（推荐，轻量高效）
+  # - se: Squeeze-and-Excitation（效果稳定但参数更多）
+  # - cbam: 通道+空间注意力（最强但最慢）
+  attention_type: "eca"
+  
+  # DropPath (随机深度) 正则化
+  # 概率从第一层 0 线性递增到最后一层的 drop_path_rate
+  # 推荐值: 0.1 ~ 0.3
+  drop_path_rate: 0.1
+  
+  # 双向 Mamba (可选，训练时间约增加 50%)
+  # 仅在最终验证时启用，日常实验使用单向 Mamba
+  use_bidirectional: false
+  bidirectional_fusion: "add"  # "add", "concat", "gate"
 
 # 分类器设置
 classifier:
   hidden_dim: 128  # 设为 null 以使用线性分类器
-  dropout: 0.3
+  dropout: 0.5     # 增大 dropout 缓解过拟合 (原 0.3)
+  use_bn: true     # 使用 BatchNorm
+  use_ln: false    # 使用 LayerNorm (与 use_bn 互斥)
+  num_layers: 1    # 隐藏层数量 (1 或 2)
 
 # 训练设置
 training:
   # 基础参数
-  num_epochs: 100
-  batch_size: 32
+  num_epochs: 50
+  batch_size: 128
   learning_rate: 1e-3
   weight_decay: 1e-4
   
@@ -75,6 +95,15 @@ training:
   label_smoothing: 0.1
   use_class_weights: true
   grad_clip_norm: 1.0
+  
+  # ============== 新增：损失函数选择 ==============
+  # 损失函数类型: "ce", "focal", "label_smoothing"
+  # - ce: 标准交叉熵 (可配合 label_smoothing 使用)
+  # - focal: Focal Loss (推荐用于类别不平衡)
+  loss_type: "focal"
+  
+  # Focal Loss 参数 (仅当 loss_type="focal" 时生效)
+  focal_gamma: 2.0  # 聚焦参数，推荐值 [0.5, 5]
   
   # 早停
   early_stopping_patience: 20
@@ -127,3 +156,10 @@ seed: 42
 # 设备设置
 device: "cuda"  # cuda 或 cpu
 distributed: false
+
+# ============== 数据缓存 ==============
+data_cache:
+  cache_in_memory: true
+  view_cache_refresh_epochs: 5
+  use_gpu_augment: true
+

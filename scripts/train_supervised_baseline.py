@@ -79,6 +79,9 @@ class SupervisedModel(nn.Module):
         encoder_dim: int = 256,
         hidden_dim: int = 128,
         dropout: float = 0.3,
+        use_bn: bool = True,
+        use_ln: bool = False,
+        classifier_num_layers: int = 1,
     ):
         """
         参数:
@@ -87,6 +90,9 @@ class SupervisedModel(nn.Module):
             encoder_dim: 编码器输出维度
             hidden_dim: 分类头隐藏层维度
             dropout: Dropout 率
+            use_bn: 是否使用 BatchNorm
+            use_ln: 是否使用 LayerNorm
+            classifier_num_layers: 分类头隐藏层数量
         """
         super().__init__()
         
@@ -96,7 +102,10 @@ class SupervisedModel(nn.Module):
             input_dim=encoder_dim,
             num_classes=num_classes,
             hidden_dim=hidden_dim,
-            dropout=dropout
+            dropout=dropout,
+            use_bn=use_bn,
+            use_ln=use_ln,
+            num_layers=classifier_num_layers,
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -277,13 +286,14 @@ def load_task_config(args):
 
 
 def create_dataloaders(config, args, logger):
-    """创建训练和验证数据加载器。"""
+    """创建训练、验证和测试数据加载器。"""
     # 构建数据路径
     task_name = config.task.name if hasattr(config.task, 'name') else args.task
     data_dir = Path(args.data_dir) / task_name
     
     train_csv = data_dir / "train.csv"
     val_csv = data_dir / "val.csv"
+    test_csv = data_dir / "test.csv"
     
     if not train_csv.exists():
         raise FileNotFoundError(
@@ -294,6 +304,7 @@ def create_dataloaders(config, args, logger):
     
     logger.info(f"加载训练数据: {train_csv}")
     logger.info(f"加载验证数据: {val_csv}")
+    logger.info(f"加载测试数据: {test_csv}")
     
     # 创建数据集（启用内存缓存）
     train_dataset = PCGDownstreamDataset(
@@ -314,8 +325,18 @@ def create_dataloaders(config, args, logger):
         cache_in_memory=True,
     )
     
+    test_dataset = PCGDownstreamDataset(
+        data_dir=data_dir,
+        csv_path=test_csv,
+        sample_rate=config.data.sample_rate,
+        target_length=config.data.target_length,
+        mode='val',  # 测试集使用 'val' 模式（不进行数据增强）
+        cache_in_memory=True,
+    )
+    
     logger.info(f"训练样本数: {len(train_dataset)}")
     logger.info(f"验证样本数: {len(val_dataset)}")
+    logger.info(f"测试样本数: {len(test_dataset)}")
     
     # 创建数据加载器（优化配置）
     use_persistent = args.num_workers > 0
@@ -341,7 +362,17 @@ def create_dataloaders(config, args, logger):
         persistent_workers=use_persistent,
     )
     
-    return train_loader, val_loader, train_dataset, val_dataset
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        prefetch_factor=4 if args.num_workers > 0 else None,
+        persistent_workers=use_persistent,
+    )
+    
+    return train_loader, val_loader, test_loader, train_dataset, val_dataset, test_dataset
 
 
 def create_model(config, num_classes, logger):
@@ -352,6 +383,16 @@ def create_model(config, num_classes, logger):
     
     # 创建编码器（从零初始化）
     logger.info(f"编码器类型: {config.model.encoder_type}")
+    
+    # 获取新增的模型参数
+    attention_type = getattr(config.model, 'attention_type', 'none')
+    drop_path_rate = getattr(config.model, 'drop_path_rate', 0.0)
+    use_bidirectional = getattr(config.model, 'use_bidirectional', False)
+    bidirectional_fusion = getattr(config.model, 'bidirectional_fusion', 'add')
+    
+    logger.info(f"通道注意力类型: {attention_type}")
+    logger.info(f"DropPath 率: {drop_path_rate}")
+    logger.info(f"双向 Mamba: {use_bidirectional}")
     
     # 准备编码器参数
     encoder_kwargs = {
@@ -364,6 +405,8 @@ def create_model(config, num_classes, logger):
             'channels': config.model.cnn_channels,
             'kernel_sizes': config.model.cnn_kernel_sizes,
             'strides': config.model.cnn_strides,
+            'drop_path_rate': drop_path_rate,
+            'attention_type': attention_type,
         })
     elif config.model.encoder_type == "cnn_mamba":
         encoder_kwargs.update({
@@ -374,6 +417,11 @@ def create_model(config, num_classes, logger):
             'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 4),
             'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
             'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
+            # 新增参数
+            'drop_path_rate': drop_path_rate,
+            'attention_type': attention_type,
+            'use_bidirectional': use_bidirectional,
+            'bidirectional_fusion': bidirectional_fusion,
         })
     elif config.model.encoder_type == "cnn_transformer":
         encoder_kwargs.update({
@@ -398,13 +446,23 @@ def create_model(config, num_classes, logger):
     else:
         encoder_dim = config.model.mamba_d_model if hasattr(config.model, 'mamba_d_model') else 256
     
+    # 获取分类头参数
+    classifier_hidden_dim = getattr(config.classifier, 'hidden_dim', 128)
+    classifier_dropout = getattr(config.classifier, 'dropout', 0.3)
+    classifier_use_bn = getattr(config.classifier, 'use_bn', True)
+    classifier_use_ln = getattr(config.classifier, 'use_ln', False)
+    classifier_num_layers = getattr(config.classifier, 'num_layers', 1)
+    
     # 创建完整模型
     model = SupervisedModel(
         encoder=encoder,
         num_classes=num_classes,
         encoder_dim=encoder_dim,
-        hidden_dim=config.classifier.hidden_dim,
-        dropout=config.classifier.dropout,
+        hidden_dim=classifier_hidden_dim,
+        dropout=classifier_dropout,
+        use_bn=classifier_use_bn,
+        use_ln=classifier_use_ln,
+        classifier_num_layers=classifier_num_layers,
     )
     
     # 统计参数量
@@ -482,7 +540,7 @@ def main():
     logger.info(f"配置已保存到: {config_save_path}")
     
     # 创建数据加载器
-    train_loader, val_loader, train_dataset, val_dataset = create_dataloaders(
+    train_loader, val_loader, test_loader, train_dataset, val_dataset, test_dataset = create_dataloaders(
         config, args, logger
     )
     
@@ -502,17 +560,27 @@ def main():
     # 导入训练器
     from src.trainers.downstream_trainer import DownstreamTrainer
     
+    # 检查是否启用 GPU 增强
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
+    
+    if use_gpu_augment:
+        logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
+    
     # 创建训练器
     trainer = DownstreamTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
+        test_loader=test_loader,
         config=config,
         output_dir=output_dir,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         experiment_name=args.experiment_name,
+        use_gpu_augment=use_gpu_augment,
     )
     
     # 开始训练
@@ -526,7 +594,7 @@ def main():
         logger.info("="*80)
         logger.info("训练完成")
         logger.info("="*80)
-        logger.info("最佳验证集指标:")
+        logger.info("最终测试集指标:")
         for metric_name, metric_value in best_metrics.items():
             logger.info(f"  {metric_name}: {metric_value:.4f}")
         
@@ -537,7 +605,7 @@ def main():
             "encoder_type": config.model.encoder_type,
             "experiment_name": args.experiment_name,
             "seed": args.seed,
-            "best_metrics": best_metrics,
+            "test_metrics": best_metrics,
             "config": OmegaConf.to_container(config, resolve=True),
         }
         

@@ -160,8 +160,13 @@ class ClassificationHead(nn.Module):
     """
     用于下游任务的分类头。
     
-    具有可选隐藏层和 dropout 的简单 MLP 分类器。
+    具有可选隐藏层和 dropout 的 MLP 分类器。
     用于预训练后的分类任务微调。
+    
+    新增特性：
+    - 支持 LayerNorm（可选，替代 BatchNorm）
+    - 支持更高的 dropout（缓解过拟合）
+    - 支持双层 MLP（更强的非线性）
     """
     
     def __init__(
@@ -170,7 +175,9 @@ class ClassificationHead(nn.Module):
         num_classes: int,
         hidden_dim: Optional[int] = None,
         dropout: float = 0.1,
-        use_bn: bool = True
+        use_bn: bool = True,
+        use_ln: bool = False,
+        num_layers: int = 1
     ):
         """
         参数:
@@ -179,6 +186,8 @@ class ClassificationHead(nn.Module):
             hidden_dim: 隐藏层维度（None 表示线性分类器）
             dropout: Dropout 率
             use_bn: 隐藏层是否使用 BatchNorm
+            use_ln: 是否使用 LayerNorm（与 use_bn 互斥，优先使用 ln）
+            num_layers: 隐藏层数量（1 或 2）
         """
         super().__init__()
         
@@ -191,13 +200,31 @@ class ClassificationHead(nn.Module):
         else:
             # MLP classifier
             layers = [nn.Linear(input_dim, hidden_dim)]
-            if use_bn:
+            
+            # 归一化层
+            if use_ln:
+                layers.append(nn.LayerNorm(hidden_dim))
+            elif use_bn:
                 layers.append(nn.BatchNorm1d(hidden_dim))
+            
             layers.extend([
-                nn.ReLU(inplace=True),
+                nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden_dim, num_classes)
             ])
+            
+            # 可选的第二隐藏层
+            if num_layers >= 2:
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                if use_ln:
+                    layers.append(nn.LayerNorm(hidden_dim))
+                elif use_bn:
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.extend([
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                ])
+            
+            layers.append(nn.Linear(hidden_dim, num_classes))
             self.classifier = nn.Sequential(*layers)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

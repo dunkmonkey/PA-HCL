@@ -5,6 +5,7 @@ PA-HCL 的模型架构。
 - 编码器架构 (CNN, CNN-Mamba, CNN-Transformer)
 - 用于对比学习的投影头
 - 用于下游任务的分类头
+- 通道注意力模块 (ECA, SE, CBAM)
 """
 
 from .mamba import (
@@ -12,7 +13,17 @@ from .mamba import (
     SelectiveSSM,
     MambaBlock,
     MambaEncoder,
+    BiMambaEncoder,
+    DropPath,
     get_mamba_encoder,
+    get_mamba_encoder_v2,
+)
+
+from .attention import (
+    ECABlock,
+    SEBlock,
+    CBAMBlock,
+    get_attention_block,
 )
 
 from .encoder import (
@@ -44,7 +55,15 @@ __all__ = [
     "SelectiveSSM",
     "MambaBlock",
     "MambaEncoder",
+    "BiMambaEncoder",
+    "DropPath",
     "get_mamba_encoder",
+    "get_mamba_encoder_v2",
+    # Attention
+    "ECABlock",
+    "SEBlock",
+    "CBAMBlock",
+    "get_attention_block",
     # Encoder
     "ConvBlock",
     "ResidualConvBlock",
