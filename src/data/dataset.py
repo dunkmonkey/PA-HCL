@@ -697,6 +697,40 @@ class PCGDownstreamDataset(Dataset):
         
         return torch.tensor(weights, dtype=torch.float32)
     
+    def get_sample_weights(self) -> torch.Tensor:
+        """
+        获取每个样本的权重（用于 WeightedRandomSampler）。
+        
+        根据类别不平衡程度，为每个样本分配权重：
+        - 少数类样本获得更高权重
+        - 多数类样本获得更低权重
+        
+        返回:
+            每个样本权重张量 [N]，N 为样本数
+        """
+        # 统计每个类别的样本数
+        label_counts = {}
+        for sample in self.samples:
+            label_str = sample[1]
+            label_idx = self.label_map[label_str]
+            label_counts[label_idx] = label_counts.get(label_idx, 0) + 1
+        
+        # 计算每个类别的权重（反比于样本数）
+        total = len(self.samples)
+        class_weights = {}
+        for label_idx, count in label_counts.items():
+            # 使用 1/count 作为权重，使采样时各类别期望相同
+            class_weights[label_idx] = total / (self.num_classes * count)
+        
+        # 为每个样本分配权重
+        sample_weights = []
+        for sample in self.samples:
+            label_str = sample[1]
+            label_idx = self.label_map[label_str]
+            sample_weights.append(class_weights[label_idx])
+        
+        return torch.tensor(sample_weights, dtype=torch.float32)
+    
     def get_label_distribution(self) -> Dict[str, int]:
         """
         获取标签分布统计。

@@ -287,6 +287,8 @@ def load_task_config(args):
 
 def create_dataloaders(config, args, logger):
     """创建训练、验证和测试数据加载器。"""
+    from torch.utils.data import WeightedRandomSampler
+    
     # 构建数据路径
     task_name = config.task.name if hasattr(config.task, 'name') else args.task
     data_dir = Path(args.data_dir) / task_name
@@ -338,19 +340,57 @@ def create_dataloaders(config, args, logger):
     logger.info(f"验证样本数: {len(val_dataset)}")
     logger.info(f"测试样本数: {len(test_dataset)}")
     
+    # 检查是否使用平衡采样
+    use_balanced_sampling = getattr(config.training, 'use_balanced_sampling', False)
+    
     # 创建数据加载器（优化配置）
     use_persistent = args.num_workers > 0
     
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        prefetch_factor=4 if args.num_workers > 0 else None,
-        persistent_workers=use_persistent,
-    )
+    # 训练数据加载器：根据配置选择是否使用 WeightedRandomSampler
+    if use_balanced_sampling:
+        logger.info("="*60)
+        logger.info("启用类别平衡采样 (WeightedRandomSampler)")
+        logger.info("="*60)
+        
+        # 获取每个样本的权重
+        sample_weights = train_dataset.get_sample_weights()
+        logger.info(f"  样本权重范围: [{sample_weights.min():.4f}, {sample_weights.max():.4f}]")
+        
+        # 打印类别分布和权重
+        label_dist = train_dataset.get_label_distribution()
+        class_weights = train_dataset.get_class_weights()
+        for label, count in label_dist.items():
+            label_idx = train_dataset.label_map[label]
+            logger.info(f"  类别 '{label}' (idx={label_idx}): {count} 样本, 权重={class_weights[label_idx]:.4f}")
+        
+        # 创建加权采样器 (转换为 list 以满足类型要求)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights.tolist(),
+            num_samples=len(train_dataset),
+            replacement=True  # 允许重复采样少数类
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            sampler=sampler,  # 使用加权采样器代替 shuffle
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            prefetch_factor=4 if args.num_workers > 0 else None,
+            persistent_workers=use_persistent,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            prefetch_factor=4 if args.num_workers > 0 else None,
+            persistent_workers=use_persistent,
+        )
     
     val_loader = DataLoader(
         val_dataset,
@@ -389,10 +429,15 @@ def create_model(config, num_classes, logger):
     drop_path_rate = getattr(config.model, 'drop_path_rate', 0.0)
     use_bidirectional = getattr(config.model, 'use_bidirectional', False)
     bidirectional_fusion = getattr(config.model, 'bidirectional_fusion', 'add')
+    use_multiscale = getattr(config.model, 'use_multiscale', False)
+    multiscale_kernel_sizes = getattr(config.model, 'multiscale_kernel_sizes', [3, 7, 15])
     
     logger.info(f"通道注意力类型: {attention_type}")
     logger.info(f"DropPath 率: {drop_path_rate}")
     logger.info(f"双向 Mamba: {use_bidirectional}")
+    logger.info(f"多尺度卷积: {use_multiscale}")
+    if use_multiscale:
+        logger.info(f"  多尺度卷积核: {multiscale_kernel_sizes}")
     
     # 准备编码器参数
     encoder_kwargs = {
@@ -407,6 +452,8 @@ def create_model(config, num_classes, logger):
             'strides': config.model.cnn_strides,
             'drop_path_rate': drop_path_rate,
             'attention_type': attention_type,
+            'use_multiscale': use_multiscale,
+            'multiscale_kernel_sizes': multiscale_kernel_sizes,
         })
     elif config.model.encoder_type == "cnn_mamba":
         encoder_kwargs.update({
@@ -422,6 +469,8 @@ def create_model(config, num_classes, logger):
             'attention_type': attention_type,
             'use_bidirectional': use_bidirectional,
             'bidirectional_fusion': bidirectional_fusion,
+            'use_multiscale': use_multiscale,
+            'multiscale_kernel_sizes': multiscale_kernel_sizes,
         })
     elif config.model.encoder_type == "cnn_transformer":
         encoder_kwargs.update({

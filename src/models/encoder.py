@@ -191,6 +191,118 @@ class ResidualConvBlock(nn.Module):
         return out
 
 
+class MultiScaleConvBlock(nn.Module):
+    """
+    多尺度并行卷积块，捕获不同时间尺度的特征。
+    
+    结构:
+        x -> [Conv_k1, Conv_k2, Conv_k3, ...] -> Concat -> 1x1 Conv -> BN -> Act -> Output
+        |___________________________________________________________|
+                              (shortcut if needed)
+    
+    不同大小的卷积核并行处理输入，捕获：
+    - 小卷积核 (3): 高频局部特征（如心脏杂音的高频成分）
+    - 中卷积核 (7): 中频模式（如 S1/S2 心音）
+    - 大卷积核 (15): 低频趋势（如心动周期整体形态）
+    
+    最终通过 1x1 卷积融合多尺度特征。
+    """
+    
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_sizes: List[int] = [3, 7, 15],
+        stride: int = 2,
+        dropout: float = 0.1,
+        drop_path: float = 0.0,
+        attention_type: str = "none"
+    ):
+        """
+        参数:
+            in_channels: 输入通道数
+            out_channels: 输出通道数
+            kernel_sizes: 并行卷积核大小列表
+            stride: 下采样步幅
+            dropout: Dropout 率
+            drop_path: DropPath 率（随机深度）
+            attention_type: 注意力类型 ("none", "eca", "se", "cbam")
+        """
+        super().__init__()
+        
+        self.num_scales = len(kernel_sizes)
+        
+        # 每个分支的通道数（平分 out_channels）
+        branch_channels = out_channels // self.num_scales
+        # 确保总通道数正确（处理不能整除的情况）
+        self.branch_channels = [branch_channels] * (self.num_scales - 1)
+        self.branch_channels.append(out_channels - branch_channels * (self.num_scales - 1))
+        
+        # 并行卷积分支
+        self.branches = nn.ModuleList()
+        for i, k in enumerate(kernel_sizes):
+            padding = k // 2
+            self.branches.append(nn.Sequential(
+                nn.Conv1d(
+                    in_channels, self.branch_channels[i],
+                    kernel_size=k, stride=stride,
+                    padding=padding, bias=False
+                ),
+                nn.BatchNorm1d(self.branch_channels[i]),
+                nn.GELU()
+            ))
+        
+        # 1x1 融合卷积
+        self.fusion = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=1, bias=False),
+            nn.BatchNorm1d(out_channels)
+        )
+        
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        
+        # 捷径连接
+        if in_channels != out_channels or stride != 1:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+        
+        # 注意力模块
+        self.attention = get_attention_block(attention_type, out_channels)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        参数:
+            x: 输入张量 [B, C_in, L]
+            
+        返回:
+            输出张量 [B, C_out, L']
+        """
+        identity = self.shortcut(x)
+        
+        # 多尺度并行卷积
+        branch_outputs = [branch(x) for branch in self.branches]
+        
+        # 拼接多尺度特征
+        out = torch.cat(branch_outputs, dim=1)
+        
+        # 1x1 融合
+        out = self.fusion(out)
+        out = self.dropout(out)
+        
+        # 残差连接 + DropPath
+        out = self.drop_path(out)
+        out = out + identity
+        out = self.act(out)
+        out = self.attention(out)
+        
+        return out
+
+
 class CNNBackbone(nn.Module):
     """
     用于心音特征提取的多尺度一维 CNN 主干网络。
@@ -216,7 +328,9 @@ class CNNBackbone(nn.Module):
         dropout: float = 0.1,
         drop_path_rate: float = 0.0,
         use_residual: bool = True,
-        attention_type: str = "none"
+        attention_type: str = "none",
+        use_multiscale: bool = False,
+        multiscale_kernel_sizes: List[int] = [3, 7, 15]
     ):
         """
         参数:
@@ -228,12 +342,15 @@ class CNNBackbone(nn.Module):
             drop_path_rate: 最大 DropPath 率（线性递增）
             use_residual: 是否使用残差连接
             attention_type: 注意力类型 ("none", "eca", "se", "cbam")
+            use_multiscale: 是否使用多尺度并行卷积
+            multiscale_kernel_sizes: 多尺度卷积核大小列表
         """
         super().__init__()
         
         self.in_channels = in_channels
         self.channels = channels
         self.num_layers = len(channels)
+        self.use_multiscale = use_multiscale
         
         # 计算每层的 drop_path 率（线性递增）
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, len(channels))]
@@ -243,7 +360,17 @@ class CNNBackbone(nn.Module):
         in_ch = in_channels
         
         for i, (out_ch, k, s) in enumerate(zip(channels, kernel_sizes, strides)):
-            if use_residual and i > 0:
+            if use_multiscale and i > 0:
+                # 从第二层开始使用多尺度卷积（第一层保留常规卷积做初始特征提取）
+                layers.append(MultiScaleConvBlock(
+                    in_ch, out_ch,
+                    kernel_sizes=multiscale_kernel_sizes,
+                    stride=s,
+                    dropout=dropout,
+                    drop_path=dpr[i],
+                    attention_type=attention_type
+                ))
+            elif use_residual and i > 0:
                 layers.append(ResidualConvBlock(
                     in_ch, out_ch,
                     kernel_size=k,
@@ -360,7 +487,10 @@ class CNNMambaEncoder(nn.Module):
         drop_path_rate: float = 0.0,
         attention_type: str = "none",
         use_bidirectional: bool = False,
-        bidirectional_fusion: str = "add"
+        bidirectional_fusion: str = "add",
+        # 新增：多尺度卷积
+        use_multiscale: bool = False,
+        multiscale_kernel_sizes: List[int] = [3, 7, 15]
     ):
         """
         参数:
@@ -379,12 +509,14 @@ class CNNMambaEncoder(nn.Module):
             attention_type: 通道注意力类型 ("none", "eca", "se", "cbam")
             use_bidirectional: 是否使用双向 Mamba
             bidirectional_fusion: 双向融合方式 ("add", "concat", "gate")
+            use_multiscale: 是否使用多尺度并行卷积
+            multiscale_kernel_sizes: 多尺度卷积核大小列表
         """
         super().__init__()
         
         self.pool_type = pool_type
         
-        # CNN backbone (支持注意力和 DropPath)
+        # CNN backbone (支持注意力、DropPath 和多尺度卷积)
         self.cnn = CNNBackbone(
             in_channels=in_channels,
             channels=cnn_channels,
@@ -392,7 +524,9 @@ class CNNMambaEncoder(nn.Module):
             strides=cnn_strides,
             dropout=cnn_dropout,
             drop_path_rate=drop_path_rate / 2,  # CNN 使用一半的 drop_path
-            attention_type=attention_type
+            attention_type=attention_type,
+            use_multiscale=use_multiscale,
+            multiscale_kernel_sizes=multiscale_kernel_sizes
         )
         
         # 如果需要，投影到 Mamba 维度

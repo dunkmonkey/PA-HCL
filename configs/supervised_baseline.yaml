@@ -69,6 +69,15 @@ model:
   # 仅在最终验证时启用，日常实验使用单向 Mamba
   use_bidirectional: false
   bidirectional_fusion: "add"  # "add", "concat", "gate"
+  
+  # ============== 多尺度并行卷积 ==============
+  # 使用多个不同大小卷积核并行处理，捕获多尺度时间特征
+  # - 小卷积核 (3): 高频局部特征（杂音高频成分）
+  # - 中卷积核 (7): 中频模式（S1/S2 心音）
+  # - 大卷积核 (15): 低频趋势（心动周期整体形态）
+  # 注意：启用后会增加约 30% 的参数量
+  use_multiscale: false
+  multiscale_kernel_sizes: [3, 7, 15]
 
 # 分类器设置
 classifier:
@@ -96,14 +105,21 @@ training:
   use_class_weights: true
   grad_clip_norm: 1.0
   
-  # ============== 新增：损失函数选择 ==============
+  # ============== 类别平衡采样 ==============
+  # 启用 WeightedRandomSampler 解决类别不平衡问题
+  # 优点：不改变损失函数，直接在采样阶段平衡类别
+  # 缺点：少数类样本会被重复采样
+  use_balanced_sampling: true
+  
+  # ============== 损失函数选择 ==============
   # 损失函数类型: "ce", "focal", "label_smoothing"
-  # - ce: 标准交叉熵 (可配合 label_smoothing 使用)
-  # - focal: Focal Loss (推荐用于类别不平衡)
-  loss_type: "focal"
+  # - ce: 标准交叉熵 (推荐，配合 use_balanced_sampling 或 use_class_weights)
+  # - focal: Focal Loss (谨慎使用，gamma 过大会降低特异性)
+  loss_type: "ce"
   
   # Focal Loss 参数 (仅当 loss_type="focal" 时生效)
-  focal_gamma: 2.0  # 聚焦参数，推荐值 [0.5, 5]
+  # 注意：gamma >= 2.0 可能导致正常样本学习不足，特异性下降
+  focal_gamma: 1.0  # 降低 gamma，推荐值 [0.5, 1.5]
   
   # 早停
   early_stopping_patience: 20

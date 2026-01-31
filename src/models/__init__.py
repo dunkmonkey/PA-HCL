@@ -29,6 +29,7 @@ from .attention import (
 from .encoder import (
     ConvBlock,
     ResidualConvBlock,
+    MultiScaleConvBlock,
     CNNBackbone,
     CNNMambaEncoder,
     CNNTransformerEncoder,
