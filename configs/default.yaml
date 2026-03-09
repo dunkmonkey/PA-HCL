@@ -60,9 +60,9 @@ augmentation:
 # ============== 模型 ==============
 model:
   encoder:
-    type: "cnn_mamba"  # 选项: cnn_only, cnn_transformer, cnn_mamba
+    type: "cnn_mamba"  # 选项: cnn_only, cnn_transformer, cnn_mamba, sincnet_eca_mamba
     
-    # CNN 主干
+    # CNN 主干 (用于 cnn_only, cnn_transformer, cnn_mamba)
     cnn:
       in_channels: 1
       channels: [32, 64, 128, 256]
@@ -77,6 +77,37 @@ model:
       d_state: 16
       expand: 2
       dropout: 0.1
+    
+    # SincNet+ECA+ASP+Mamba 编码器 (推荐，轻量高效)
+    # 启用方式: 将 type 设为 "sincnet_eca_mamba"
+    sincnet_eca_mamba:
+      # SincNet 前端
+      sinc_out_channels: 64
+      sinc_kernel_size: 251
+      sinc_stride: 2
+      sample_rate: 5000
+      
+      # 阶段配置
+      stage1_channels: [64, 96]
+      stage2_channels: [96, 128]
+      
+      # 轻量 Mamba
+      mamba_d_model: 128
+      mamba_n_layers: 2
+      mamba_d_state: 16
+      mamba_d_conv: 4
+      mamba_expand: 2
+      mamba_dropout: 0.1
+      
+      # 归一化和注意力
+      use_groupnorm: true
+      num_groups: 8
+      eca_kernel_size: 3
+      
+      # 输出配置
+      cycle_output_dim: 192
+      num_substructures: 4
+      pool_type: "asp"  # asp 或 mean
       
   # 用于对比学习的投影头
   projection_head:
@@ -85,7 +116,9 @@ model:
     num_layers: 2
     use_bn: true
     
-  # 特征维度
+  # 特征维度 (根据编码器类型自动设置)
+  # cnn_mamba: cycle=256, sub=128
+  # sincnet_eca_mamba: cycle=192, sub=128
   cycle_feature_dim: 256
   sub_feature_dim: 128
 

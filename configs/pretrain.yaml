@@ -24,9 +24,9 @@ data:
 
 # 模型架构
 model:
-  encoder_type: "cnn_mamba"  # "cnn_mamba", "cnn_transformer", "cnn_only"
+  encoder_type: "cnn_mamba"  # "cnn_mamba", "cnn_transformer", "cnn_only", "sincnet_eca_mamba"
   
-  # CNN 主干网络
+  # CNN 主干网络 (用于 cnn_mamba, cnn_transformer, cnn_only)
   cnn_channels: [32, 64, 128, 256]
   cnn_kernel_sizes: [7, 5, 5, 3]
   cnn_strides: [2, 2, 2, 2]  # 总下采样: 16x
@@ -39,8 +39,29 @@ model:
   mamba_expand: 2
   mamba_dropout: 0.1
   
+  # SincNet + ECA + ASP + Mamba 编码器设置 (用于 sincnet_eca_mamba)
+  # 启用方式: 将 encoder_type 设为 "sincnet_eca_mamba"
+  # 此编码器更轻量，更适合心音信号的频带特性：
+  #   - SincNet 前端学习可解释的带通滤波器
+  #   - ECA 注意力提供轻量通道重标定
+  #   - ASP 池化提取关键帧统计特征
+  #   - 轻量 Mamba (2层) 建模长程依赖
+  # 使用示例配置（取消下面注释并设置 encoder_type）:
+  # encoder_type: "sincnet_eca_mamba"
+  # sinc_out_channels: 64
+  # sinc_kernel_size: 251
+  # sinc_stride: 2
+  # stage1_channels: [64, 96]
+  # stage2_channels: [96, 128]
+  # mamba_d_model: 128  # 轻量配置
+  # mamba_n_layers: 2   # 减少层数
+  # use_groupnorm: true
+  # num_groups: 8
+  # eca_kernel_size: 3
+  # cycle_output_dim: 192  # 周期级输出维度
+  
   # 池化层
-  pool_type: "mean"  # "mean", "max", "cls"
+  pool_type: "mean"  # "mean", "max", "cls", "asp" (仅 sincnet_eca_mamba 支持 asp)
   
   # 投影头
   proj_hidden_dim: 512

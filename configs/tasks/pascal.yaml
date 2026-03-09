@@ -26,6 +26,11 @@ classification:
     extrasystole: 2
 
 # 模型设置 (应与预训练一致)
+# 如果使用新的 SincNet+ECA+Mamba 编码器预训练的模型，配置为：
+#   encoder_type: "sincnet_eca_mamba"
+#   mamba_d_model: 128
+#   mamba_n_layers: 2
+#   pool_type: "asp"
 model:
   encoder_type: "cnn_mamba"
   cnn_channels: [32, 64, 128, 256]

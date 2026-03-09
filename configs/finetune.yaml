@@ -29,17 +29,30 @@ data:
 
 # 模型 (应与预训练模型匹配)
 model:
-  encoder_type: "cnn_mamba"
+  encoder_type: "cnn_mamba"  # 选项: cnn_mamba, sincnet_eca_mamba
+  
+  # CNN+Mamba 配置 (当 encoder_type="cnn_mamba" 时使用)
   cnn_channels: [32, 64, 128, 256]
   cnn_kernel_sizes: [7, 5, 5, 3]
   cnn_strides: [2, 2, 2, 2]
   mamba_d_model: 256
   mamba_n_layers: 4
+  
+  # SincNet+ECA+Mamba 配置 (当 encoder_type="sincnet_eca_mamba" 时使用)
+  # 如果使用新编码器预训练的模型，设置为:
+  # encoder_type: "sincnet_eca_mamba"
+  # mamba_d_model: 128
+  # mamba_n_layers: 2
+  # pool_type: "asp"
+  # cycle_output_dim: 192
 
 # 分类器设置
 classifier:
   hidden_dim: 128  # 设为 null 以使用线性分类器
   dropout: 0.3
+  use_bn: true     # 使用 BatchNorm
+  use_ln: false    # 使用 LayerNorm
+  num_layers: 1    # 隐藏层数量
 
 # 下游任务默认设置 (向后兼容)
 downstream:

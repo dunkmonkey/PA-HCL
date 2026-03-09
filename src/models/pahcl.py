@@ -121,6 +121,21 @@ class PAHCLModel(nn.Module):
             encoder_out_dim = mamba_d_model
             # 子结构特征维度来自倒数第二层 CNN 层
             sub_feature_dim = cnn_channels[-2] if len(cnn_channels) >= 2 else cnn_channels[-1]
+        elif encoder_type == "sincnet_eca_mamba":
+            # 新的优化编码器
+            self.encoder = build_encoder(encoder_type, **{
+                "in_channels": in_channels,
+                "mamba_d_model": mamba_d_model,
+                "mamba_n_layers": mamba_n_layers,
+                "mamba_d_state": mamba_d_state,
+                "mamba_expand": mamba_expand,
+                "mamba_dropout": mamba_dropout,
+                "pool_type": pool_type
+            })
+            # 新编码器输出 192 维（周期级特征）
+            encoder_out_dim = getattr(self.encoder, 'cycle_output_dim', 192)
+            # 子结构特征维度为 128（Stage 2 输出）
+            sub_feature_dim = 128
         else:
             self.encoder = build_encoder(encoder_type, **{
                 "in_channels": in_channels,
@@ -156,6 +171,16 @@ class PAHCLModel(nn.Module):
                     mamba_dropout=mamba_dropout,
                     pool_type=pool_type
                 )
+            elif encoder_type == "sincnet_eca_mamba":
+                self.encoder_momentum = build_encoder(encoder_type, **{
+                    "in_channels": in_channels,
+                    "mamba_d_model": mamba_d_model,
+                    "mamba_n_layers": mamba_n_layers,
+                    "mamba_d_state": mamba_d_state,
+                    "mamba_expand": mamba_expand,
+                    "mamba_dropout": mamba_dropout,
+                    "pool_type": pool_type
+                })
             else:
                 self.encoder_momentum = build_encoder(encoder_type, **{
                     "in_channels": in_channels,
