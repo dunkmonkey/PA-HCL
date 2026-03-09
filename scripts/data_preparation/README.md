@@ -100,6 +100,9 @@ python prepare_circor.py \
 # 4. 运行预处理
 cd ../..
 python scripts/preprocess.py --raw_dir /root/autodl-tmp/data/raw/circor --output_dir /root/autodl-tmp/data/processed
+
+# 当前版本默认启用噪声鲁棒的 Shannon 分割与谷点定界，
+# 会尽量避免在 S1/S2 主峰上直接切分周期。
 ```
 
 ---
