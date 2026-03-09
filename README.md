@@ -103,6 +103,26 @@ pip install -e .
 python scripts/preprocess.py --config configs/default.yaml
 ```
 
+当前版本默认在内部使用噪声鲁棒的 Shannon 能量分割与谷点定界来生成更完整的心动周期，命令行参数和输出目录结构保持不变。
+
+### 预处理结果可视化
+
+使用 `scripts/visualize_cycles.py` 可以快速检查心动周期划分与质量过滤情况：
+
+```bash
+python scripts/visualize_cycles.py \
+    --input-path /root/autodl-tmp/data/processed_circor_pretrain/subject_9979 \
+    --raw-root /root/autodl-tmp/data/raw/circor \
+    --show-envelope
+```
+
+- `--input-path` 可指向单个 `rec_*` 目录、`subject_*` 目录，或包含多个 `subject_*` 的数据集根目录（一次性批量生成所有受试者的图像）
+- `--raw-root` 指向原始 WAV 目录，用于恢复完整时间轴
+- 每条记录会生成一张 PNG，绿色代表保留周期，红色代表质量过滤掉的周期
+- 默认输出路径为 `outputs/visualize_output/`（位于仓库根目录），脚本会按受试者建立子文件夹，可通过 `--output-dir` 覆盖
+
+必要时可用 `--sample-rate`、`--target-length` 等参数与预处理配置保持一致。
+
 ### 自监督预训练
 
 ```bash

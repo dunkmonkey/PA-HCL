@@ -18,7 +18,7 @@ data:
   # 周期提取
   cycle:
     min_duration: 0.4   # 秒，最小周期长度
-    max_duration: 1.5   # 秒，最大周期长度
+    max_duration: 1.2   # 秒，最大周期长度
     target_length: 4000 # 样本数，重采样后的固定长度 (0.8s * 5000Hz)
     
   # 子结构设置

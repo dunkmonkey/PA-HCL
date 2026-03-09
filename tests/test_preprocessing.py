@@ -21,7 +21,9 @@ from src.data.preprocessing import (
     normalize_signal,
     compute_energy_envelope,
     detect_peaks,
+    detect_peaks_adaptive,
     extract_cycles,
+    extract_cycles_with_positions,
     split_substructures,
     compute_snr,
     assess_cycle_quality,
@@ -198,6 +200,31 @@ class TestEnvelopeAndPeaks:
         assert len(peaks) >= 3
         assert len(peaks) <= 10
 
+    def test_detect_peaks_adaptive_ignores_edge_noise(self, sample_rate):
+        """测试自适应峰值检测在边缘强噪声下仍聚焦有效心音。"""
+        duration = 6.0
+        t = np.linspace(0, duration, int(duration * sample_rate), endpoint=False)
+        signal_data = 0.02 * np.random.randn(len(t))
+
+        for beat_time in [1.0, 2.0, 3.0, 4.0, 5.0]:
+            idx = int(beat_time * sample_rate)
+            pulse = np.exp(-((np.arange(120) - 60) ** 2) / 300)
+            signal_data[idx:idx + 120] += 0.8 * pulse * np.sin(2 * np.pi * 55 * np.arange(120) / sample_rate)
+
+        signal_data[:300] += 4.0 * np.random.randn(300)
+        signal_data[-300:] += 4.0 * np.random.randn(300)
+
+        filtered = bandpass_filter(signal_data.astype(np.float32), sample_rate)
+        normalized = normalize_signal(filtered, method="zscore")
+        envelope, _ = compute_energy_envelope(normalized, sample_rate)
+        hop_length = int(10.0 * sample_rate / 1000)
+
+        peaks = detect_peaks_adaptive(envelope, sample_rate, hop_length)
+
+        assert len(peaks) >= 3
+        assert np.all(peaks > 500)
+        assert np.all(peaks < len(signal_data) - 500)
+
 
 # ============== Cycle Extraction Tests ==============
 
@@ -233,6 +260,26 @@ class TestCycleExtraction:
         
         # Should only keep the 1.0s cycles
         assert len(cycles) == 2
+
+    def test_extract_cycles_with_positions_uses_valley_boundaries(self, synthetic_pcg, sample_rate):
+        """测试完整周期切分时边界不直接落在主峰上。"""
+        peaks = np.array([5000, 10000, 15000, 20000])
+
+        cycles = extract_cycles_with_positions(
+            synthetic_pcg,
+            peaks,
+            sample_rate,
+            min_duration_sec=0.5,
+            max_duration_sec=2.0,
+            target_length=4000,
+        )
+
+        assert len(cycles) >= 2
+        assert all(len(segment) == 4000 for _, _, segment in cycles)
+
+        interior_peaks = set(peaks[1:-1].tolist())
+        assert all(start not in interior_peaks for start, _, _ in cycles)
+        assert all(end not in interior_peaks for _, end, _ in cycles)
     
     def test_split_substructures(self):
         """测试子结构划分。"""

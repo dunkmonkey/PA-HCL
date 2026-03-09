@@ -49,7 +49,8 @@ from src.data.preprocessing import (
     normalize_signal,
     compute_energy_envelope,
     detect_peaks_adaptive,
-    extract_cycles,
+    extract_cycles_with_positions,
+    _normalize_length,
     split_substructures,
     assess_cycle_quality,
 )
@@ -155,11 +156,11 @@ def process_single_recording(
         num_peaks = len(peaks)
         
         # 第 6 步: 提取周期
-        cycles_raw = extract_cycles(
+        cycle_segments = extract_cycles_with_positions(
             normalized, peaks, sr,
             min_duration_sec=min_cycle_duration,
             max_duration_sec=max_cycle_duration,
-            target_length=target_cycle_length,
+            target_length=None,
             padding_mode="zero"
         )
         
@@ -171,15 +172,16 @@ def process_single_recording(
         cycles_passed = 0
         cycles_failed = 0
         
-        for idx, cycle in enumerate(cycles_raw):
+        for idx, (_, _, raw_cycle) in enumerate(cycle_segments):
             # 质量评估
-            quality = assess_cycle_quality(cycle, sr, min_snr_db)
+            quality = assess_cycle_quality(raw_cycle, sr, min_snr_db)
             
             if not quality["valid"]:
                 cycles_failed += 1
                 continue
             
             cycles_passed += 1
+            cycle = _normalize_length(raw_cycle, target_cycle_length, mode="zero")
             
             # 保存周期
             cycle_path = subject_output_dir / f"cycle_{idx:04d}.npy"
@@ -201,7 +203,7 @@ def process_single_recording(
             original_duration_sec=original_duration,
             sample_rate=sr,
             num_peaks_detected=num_peaks,
-            num_cycles_extracted=len(cycles_raw),
+            num_cycles_extracted=len(cycle_segments),
             num_cycles_passed_quality=cycles_passed,
             num_cycles_failed_quality=cycles_failed,
             processing_time_sec=processing_time,
