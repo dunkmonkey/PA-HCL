@@ -32,7 +32,9 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from src.config import load_config, print_config
+from omegaconf import OmegaConf
+
+from src.config import load_config, save_config, build_effective_run_config, build_config_summary
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 
@@ -175,24 +177,38 @@ def main():
         logger.info("=" * 60)
         logger.info("PA-HCL 预训练")
         logger.info("=" * 60)
-        print_config(config)
+
+        config_summary = build_config_summary(config, stage="pretrain")
+        logger.info("配置摘要（统一模板）:\n%s", OmegaConf.to_yaml(config_summary, resolve=True))
     
     # 设置种子
     set_seed(args.seed)
     
+    # 读取 GPU 增强配置（单路径：CPU 或 GPU 二选一）
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
+
+    augmentation_config = config.augmentation if hasattr(config, 'augmentation') else None
+
     # 构建数据集
     from src.data.dataset import PCGPretrainDataset, create_dataloaders, create_subject_wise_split
     from src.data.transforms import get_pretrain_transforms
-    
-    transforms = get_pretrain_transforms(
-        sample_rate=config.data.sample_rate
-    )
+
+    transforms = None
+    if not use_gpu_augment:
+        transforms = get_pretrain_transforms(
+            config=augmentation_config,
+            sample_rate=config.data.sample_rate
+        )
     
     # 加载完整数据集
     full_dataset = PCGPretrainDataset(
         data_dir=config.data.processed_dir,
         transform=transforms,
+        augmentation_config=augmentation_config,
         num_substructures=config.data.num_substructures,
+        use_gpu_augment=use_gpu_augment,
     )
     
     # 创建受试者级划分 (9:1 = 训练:验证)
@@ -234,14 +250,14 @@ def main():
     if is_main:
         output_path = Path(args.output_dir) / args.experiment_name
         output_path.mkdir(parents=True, exist_ok=True)
-        config_save_path = output_path / 'config.yaml'
-        
-        # 直接复制原始配置文件
-        try:
-            shutil.copy(args.config, config_save_path)
-            logger.info(f"Configuration copied to {config_save_path}")
-        except Exception as e:
-            logger.warning(f"Failed to copy config file: {e}")
+        resolved_config_path = output_path / "resolved_config.yaml"
+        effective_config_path = output_path / "effective_config.yaml"
+
+        save_config(config, resolved_config_path)
+        save_config(build_effective_run_config(config, stage="pretrain"), effective_config_path)
+
+        logger.info(f"完整解析配置已保存: {resolved_config_path}")
+        logger.info(f"有效运行配置已保存: {effective_config_path}")
     
     # 创建训练器
     from src.trainers.pretrain_trainer import PretrainTrainer
@@ -278,13 +294,8 @@ def main():
         trainer.load_checkpoint(args.resume)
     
     # 启用 GPU 增强（如果配置中启用）
-    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
-    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
-        use_gpu_augment = config.data_cache.use_gpu_augment
-    
     if use_gpu_augment:
         try:
-            augmentation_config = config.data.augmentation if hasattr(config.data, 'augmentation') else None
             trainer.enable_gpu_augment(
                 augmentation_config=augmentation_config,
                 sample_rate=config.data.sample_rate

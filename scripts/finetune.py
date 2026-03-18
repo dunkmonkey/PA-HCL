@@ -48,8 +48,9 @@ sys.path.insert(0, str(project_root))
 
 import torch
 import numpy as np
+from omegaconf import OmegaConf
 
-from src.config import load_config, print_config
+from src.config import load_config, save_config, build_effective_run_config, build_config_summary
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 
@@ -228,43 +229,17 @@ def load_task_config(args):
     
     # 如果有任务配置，加载并合并
     if task_config_path and task_config_path.exists():
-        task_config = load_config(str(task_config_path))
-        config = merge_configs(base_config, task_config)
+        task_config = OmegaConf.load(task_config_path)
+        task_cfg_container = OmegaConf.to_container(task_config, resolve=False)
+        if isinstance(task_cfg_container, dict) and "defaults" in task_cfg_container:
+            task_cfg_container.pop("defaults", None)
+            task_config = OmegaConf.create(task_cfg_container)
+        config = OmegaConf.merge(base_config, task_config)
     else:
         config = base_config
         task_config_path = Path(args.config)
     
     return config, task_config_path
-
-
-def merge_configs(base, override):
-    """递归合并配置，override 优先。"""
-    from types import SimpleNamespace
-    
-    def to_dict(obj):
-        if isinstance(obj, SimpleNamespace):
-            return {k: to_dict(v) for k, v in vars(obj).items()}
-        return obj
-    
-    def to_namespace(d):
-        if isinstance(d, dict):
-            return SimpleNamespace(**{k: to_namespace(v) for k, v in d.items()})
-        return d
-    
-    base_dict = to_dict(base)
-    override_dict = to_dict(override)
-    
-    def deep_merge(b, o):
-        result = b.copy() if isinstance(b, dict) else {}
-        for key, value in o.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = deep_merge(result[key], value)
-            else:
-                result[key] = value
-        return result
-    
-    merged = deep_merge(base_dict, override_dict)
-    return to_namespace(merged)
 
 
 def main():
@@ -280,6 +255,10 @@ def main():
         task_name = args.task
     else:
         task_name = "default"
+
+    if args.task:
+        config.task.name = args.task
+        task_name = args.task
     
     # 应用命令行覆盖
     if hasattr(config, 'training'):
@@ -325,6 +304,17 @@ def main():
     if args.few_shot:
         logger.info(f"小样本学习: {args.shot_ratio*100:.1f}%")
     logger.info(f"输出目录: {output_dir}")
+
+    effective_config = build_effective_run_config(config, stage="finetune")
+    config_summary = build_config_summary(config, stage="finetune")
+    logger.info("配置摘要（统一模板）:\n%s", OmegaConf.to_yaml(config_summary, resolve=True))
+
+    resolved_config_path = output_dir / "resolved_config.yaml"
+    effective_config_path = output_dir / "effective_config.yaml"
+    save_config(config, resolved_config_path)
+    save_config(effective_config, effective_config_path)
+    logger.info(f"完整解析配置已保存: {resolved_config_path}")
+    logger.info(f"有效运行配置已保存: {effective_config_path}")
     
     set_seed(args.seed)
     
@@ -338,6 +328,11 @@ def main():
     
     # 获取训练参数
     batch_size = getattr(training_cfg, 'batch_size', 32)
+
+    # GPU 增强配置（单路径：CPU 或 GPU 二选一）
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
     
     # 创建数据加载器
     try:
@@ -345,7 +340,8 @@ def main():
             task_name=task_name,
             base_dir=args.data_dir,
             batch_size=batch_size,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            use_gpu_augment=use_gpu_augment,
         )
         
         train_loader = data_loaders['train']
@@ -499,10 +495,6 @@ def main():
     logger.info(f"  主要指标: {primary_metric}")
     
     # ============== GPU 增强配置 ==============
-    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
-    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
-        use_gpu_augment = config.data_cache.use_gpu_augment
-    
     if use_gpu_augment:
         logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
     

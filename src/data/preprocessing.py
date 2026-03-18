@@ -528,6 +528,66 @@ def extract_cycles(
     return cycles
 
 
+def extract_fixed_windows(
+    signal_data: np.ndarray,
+    sample_rate: int,
+    window_sec: float = 2.0,
+    overlap_sec: float = 1.0,
+    target_length: Optional[int] = None,
+    padding_mode: str = "zero",
+    drop_last: bool = False
+) -> List[np.ndarray]:
+    """
+    使用固定长度滑动窗口切分信号。
+
+    参数:
+        signal_data: 输入信号
+        sample_rate: 采样率 (Hz)
+        window_sec: 窗口长度（秒）
+        overlap_sec: 窗口重叠长度（秒）
+        target_length: 如果指定，将窗口标准化到该长度
+        padding_mode: 长度标准化方式（"zero", "repeat", "resample"）
+        drop_last: 是否丢弃最后一个不足窗口长度的片段
+
+    返回:
+        固定窗口片段列表
+    """
+    window_samples = int(window_sec * sample_rate)
+    overlap_samples = int(overlap_sec * sample_rate)
+    hop_samples = window_samples - overlap_samples
+
+    if window_samples <= 0:
+        raise ValueError("window_sec is too small for current sample_rate")
+    if hop_samples <= 0:
+        raise ValueError("overlap_sec must be smaller than window_sec")
+
+    segments: List[np.ndarray] = []
+    signal_length = len(signal_data)
+
+    start = 0
+    while start < signal_length:
+        end = start + window_samples
+
+        if end <= signal_length:
+            segment = signal_data[start:end].copy()
+        else:
+            if drop_last:
+                break
+            segment = signal_data[start:signal_length].copy()
+
+        if target_length is not None:
+            segment = _normalize_length(segment, target_length, padding_mode)
+
+        segments.append(segment)
+
+        if end >= signal_length and not drop_last:
+            break
+
+        start += hop_samples
+
+    return segments
+
+
 def _normalize_length(
     signal_data: np.ndarray,
     target_length: int,

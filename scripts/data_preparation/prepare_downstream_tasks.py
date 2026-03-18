@@ -36,6 +36,7 @@ PA-HCL 下游任务数据准备脚本
 
 import argparse
 import csv
+import importlib
 import json
 import logging
 import os
@@ -218,6 +219,45 @@ def save_task_config(config: TaskConfig, output_path: Path):
         json.dump(asdict(config), f, indent=2, ensure_ascii=False)
 
 
+def _import_h5py():
+    """按需导入 h5py。"""
+    try:
+        return importlib.import_module("h5py")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Found .h5 preprocessed files, but h5py is not installed in current environment."
+        ) from exc
+
+
+def iter_cycle_samples(rec_dir: Path) -> List[Tuple[Path, str]]:
+    """
+    枚举录音目录中的周期样本。
+
+    返回:
+        [(source_file_path, sample_name_in_record_dir), ...]
+
+    说明:
+        - 对 .npy: sample_name 形如 cycle_0001.npy
+        - 对 .h5: sample_name 形如 recording.h5::12（指向 cycles[12]）
+    """
+    samples: List[Tuple[Path, str]] = []
+
+    for cycle_file in sorted(rec_dir.glob("cycle_*.npy")):
+        samples.append((cycle_file, cycle_file.name))
+
+    for h5_file in sorted(rec_dir.glob("*.h5")):
+        h5py = _import_h5py()
+        with h5py.File(h5_file, "r") as h5f:
+            if "cycles" not in h5f:
+                continue
+            num_cycles = int(h5f["cycles"].shape[0])
+
+        for idx in range(num_cycles):
+            samples.append((h5_file, f"{h5_file.name}::{idx}"))
+
+    return samples
+
+
 # ============== CirCor 数据集处理 ==============
 
 def prepare_circor_murmur(
@@ -279,6 +319,7 @@ def prepare_circor_murmur(
     
     # 收集所有样本记录
     all_records: Dict[str, List[SampleRecord]] = {"train": [], "val": [], "test": []}
+    linked_targets = set()
     
     # 遍历处理后的数据目录
     processed_subjects = list(processed_dir.glob("subject_*"))
@@ -309,20 +350,23 @@ def prepare_circor_murmur(
             
             location = rec_dir.name.replace("rec_", "")
             
-            # 遍历所有周期文件
-            for cycle_file in rec_dir.glob("cycle_*.npy"):
+            # 遍历所有周期样本（支持 .npy 和 .h5::idx）
+            for cycle_file, sample_name in iter_cycle_samples(rec_dir):
                 # 目标路径
-                rel_path = f"{subject_path.name}/{rec_dir.name}/{cycle_file.name}"
+                rel_path = f"{subject_path.name}/{rec_dir.name}/{sample_name}"
                 dst_dir = output_dir / task_name / split_name / subject_path.name / rec_dir.name
                 dst_path = dst_dir / cycle_file.name
                 
-                # 复制/链接文件
-                link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                # 复制/链接文件（同一个 .h5 文件仅链接一次）
+                dst_key = str(dst_path)
+                if dst_key not in linked_targets:
+                    link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                    linked_targets.add(dst_key)
                 
                 # 记录样本
                 record = SampleRecord(
                     subject_id=subject_id,
-                    file_path=str(dst_path.relative_to(output_dir / task_name)),
+                    file_path=rel_path,
                     label=label,
                     label_name=label_name,
                     location=location,
@@ -415,6 +459,7 @@ def prepare_circor_outcome(
     
     # 收集样本记录
     all_records: Dict[str, List[SampleRecord]] = {"train": [], "val": [], "test": []}
+    linked_targets = set()
     
     processed_subjects = list(processed_dir.glob("subject_*"))
     
@@ -442,15 +487,19 @@ def prepare_circor_outcome(
             
             location = rec_dir.name.replace("rec_", "")
             
-            for cycle_file in rec_dir.glob("cycle_*.npy"):
+            for cycle_file, sample_name in iter_cycle_samples(rec_dir):
                 dst_dir = output_dir / task_name / split_name / subject_path.name / rec_dir.name
                 dst_path = dst_dir / cycle_file.name
+                rel_path = f"{subject_path.name}/{rec_dir.name}/{sample_name}"
                 
-                link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                dst_key = str(dst_path)
+                if dst_key not in linked_targets:
+                    link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                    linked_targets.add(dst_key)
                 
                 record = SampleRecord(
                     subject_id=subject_id,
-                    file_path=str(dst_path.relative_to(output_dir / task_name)),
+                    file_path=rel_path,
                     label=label,
                     label_name=label_name,
                     location=location,
@@ -557,6 +606,7 @@ def prepare_physionet2016(
     
     # 收集样本记录
     all_records: Dict[str, List[SampleRecord]] = {"train": [], "val": [], "test": []}
+    linked_targets = set()
     
     # 遍历处理后的数据目录
     for subject_path in tqdm(list(processed_dir.glob("subject_*")), desc="处理受试者"):
@@ -588,15 +638,19 @@ def prepare_physionet2016(
         # 遍历周期文件
         for rec_dir in subject_path.iterdir():
             if rec_dir.is_dir():
-                for cycle_file in rec_dir.glob("cycle_*.npy"):
+                for cycle_file, sample_name in iter_cycle_samples(rec_dir):
                     dst_dir = output_dir / task_name / split_name / subject_path.name / rec_dir.name
                     dst_path = dst_dir / cycle_file.name
+                    rel_path = f"{subject_path.name}/{rec_dir.name}/{sample_name}"
                     
-                    link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                    dst_key = str(dst_path)
+                    if dst_key not in linked_targets:
+                        link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                        linked_targets.add(dst_key)
                     
                     record = SampleRecord(
                         subject_id=matched_id,
-                        file_path=str(dst_path.relative_to(output_dir / task_name)),
+                        file_path=rel_path,
                         label=label,
                         label_name=label_name,
                         location="",
@@ -712,6 +766,7 @@ def prepare_pascal(
     
     # 收集样本记录
     all_records: Dict[str, List[SampleRecord]] = {"train": [], "val": [], "test": []}
+    linked_targets = set()
     
     for subject_path in tqdm(list(processed_dir.glob("subject_*")), desc="处理受试者"):
         subject_id = subject_path.name.replace("subject_", "")
@@ -740,15 +795,19 @@ def prepare_pascal(
         
         for rec_dir in subject_path.iterdir():
             if rec_dir.is_dir():
-                for cycle_file in rec_dir.glob("cycle_*.npy"):
+                for cycle_file, sample_name in iter_cycle_samples(rec_dir):
                     dst_dir = output_dir / task_name / split_name / subject_path.name / rec_dir.name
                     dst_path = dst_dir / cycle_file.name
+                    rel_path = f"{subject_path.name}/{rec_dir.name}/{sample_name}"
                     
-                    link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                    dst_key = str(dst_path)
+                    if dst_key not in linked_targets:
+                        link_or_copy_file(cycle_file, dst_path, copy=copy_files)
+                        linked_targets.add(dst_key)
                     
                     record = SampleRecord(
                         subject_id=matched_id,
-                        file_path=str(dst_path.relative_to(output_dir / task_name)),
+                        file_path=rel_path,
                         label=label,
                         label_name=label_name,
                         location="",

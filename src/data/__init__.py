@@ -21,6 +21,7 @@ from .preprocessing import (
     detect_peaks_adaptive,
     # 周期提取
     extract_cycles,
+    extract_fixed_windows,
     split_substructures,
     split_substructures_with_overlap,
     split_substructures_batch,  # GPU 批量版本

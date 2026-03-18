@@ -15,14 +15,15 @@ PA-HCL 数据预处理脚本
 8. 将处理后的数据保存为 .npy 文件
 
 用法：
-    python scripts/preprocess.py --config configs/default.yaml
+    python scripts/preprocess.py --config configs/preprocess.yaml
     python scripts/preprocess.py --raw_dir data/raw --output_dir data/processed
-    python scripts/preprocess.py --config configs/default.yaml --num_workers 8
+    python scripts/preprocess.py --config configs/preprocess.yaml --num_workers 8
 
 作者: PA-HCL 团队
 """
 
 import argparse
+import importlib
 import json
 import multiprocessing as mp
 import sys
@@ -49,11 +50,22 @@ from src.data.preprocessing import (
     normalize_signal,
     compute_energy_envelope,
     detect_peaks_adaptive,
-    extract_cycles_with_positions,
+    extract_cycles,
+    extract_fixed_windows,
     _normalize_length,
     split_substructures,
     assess_cycle_quality,
 )
+
+
+def _import_h5py():
+    """按需导入 h5py，并在缺失时给出可操作错误信息。"""
+    try:
+        return importlib.import_module("h5py")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "HDF5 output requires 'h5py'. Please install it in the active environment."
+        ) from exc
 
 
 # ============== 数据类 ==============
@@ -95,6 +107,11 @@ def process_single_recording(
     file_path: Path,
     output_dir: Path,
     sample_rate: int = 5000,
+    preprocess_mode: str = "envelope",
+    output_format: str = "npy",
+    fixed_window_sample_rate: int = 2500,
+    window_sec: float = 2.0,
+    overlap_sec: float = 1.0,
     target_cycle_length: int = 4000,
     num_substructures: int = 4,
     min_cycle_duration: float = 0.4,
@@ -108,7 +125,12 @@ def process_single_recording(
     参数:
         file_path: WAV 文件路径
         output_dir: 基础输出目录
-        sample_rate: 目标采样率
+        sample_rate: 能量包络模式的目标采样率
+        preprocess_mode: 预处理模式 ("envelope" 或 "fixed_window")
+        output_format: 输出格式 ("npy" 或 "hdf5")
+        fixed_window_sample_rate: 固定窗口模式采样率
+        window_sec: 固定窗口长度（秒）
+        overlap_sec: 固定窗口重叠（秒）
         target_cycle_length: 每个周期的目标长度
         num_substructures: 子结构数量 (K)
         min_cycle_duration: 最小有效周期时长
@@ -132,8 +154,13 @@ def process_single_recording(
         recording_id = file_path.stem
     
     try:
+        # 两种流程完全分离：
+        # 1) envelope: 维持原有峰值检测 + 质量过滤逻辑
+        # 2) fixed_window: 使用固定滑窗切分，不走峰值检测/质量过滤
+        target_sr = sample_rate if preprocess_mode == "envelope" else fixed_window_sample_rate
+
         # 第 1 步: 加载音频
-        audio, sr = load_audio(file_path, target_sr=sample_rate)
+        audio, sr = load_audio(file_path, target_sr=target_sr)
         original_duration = len(audio) / sr
         
         # 第 2 步: 带通滤波
@@ -142,57 +169,116 @@ def process_single_recording(
         # 第 3 步: 归一化
         normalized = normalize_signal(filtered, method="zscore")
         
-        # 第 4 步: 计算能量包络
-        envelope, _ = compute_energy_envelope(
-            normalized, sr,
-            frame_length_ms=20.0,
-            hop_length_ms=10.0,
-            method="shannon"
-        )
-        hop_length = int(10.0 * sr / 1000)
-        
-        # 第 5 步: 检测峰值
-        peaks = detect_peaks_adaptive(envelope, sr, hop_length)
-        num_peaks = len(peaks)
-        
-        # 第 6 步: 提取周期
-        cycle_segments = extract_cycles_with_positions(
-            normalized, peaks, sr,
-            min_duration_sec=min_cycle_duration,
-            max_duration_sec=max_cycle_duration,
-            target_length=None,
-            padding_mode="zero"
-        )
-        
-        # 第 7 步: 质量过滤并保存
-        # 创建输出目录结构
+        if preprocess_mode == "envelope":
+            # 第 4 步: 计算能量包络
+            envelope, _ = compute_energy_envelope(
+                normalized, sr,
+                frame_length_ms=20.0,
+                hop_length_ms=10.0,
+                method="shannon"
+            )
+            hop_length = int(10.0 * sr / 1000)
+
+            # 第 5 步: 检测峰值
+            peaks = detect_peaks_adaptive(envelope, sr, hop_length)
+            num_peaks = len(peaks)
+
+            # 第 6 步: 提取周期
+            cycles_raw = extract_cycles(
+                normalized, peaks, sr,
+                min_duration_sec=min_cycle_duration,
+                max_duration_sec=max_cycle_duration,
+                target_length=None,
+                padding_mode="zero"
+            )
+
+            # 第 7 步: 质量过滤
+            cycles: List[np.ndarray] = []
+            cycles_failed = 0
+            for raw_cycle in cycles_raw:
+                quality = assess_cycle_quality(raw_cycle, sr, min_snr_db)
+                if not quality["valid"]:
+                    cycles_failed += 1
+                    continue
+                cycle = _normalize_length(raw_cycle, target_cycle_length, mode="zero")
+                cycles.append(cycle.astype(np.float32))
+
+            cycles_passed = len(cycles)
+
+        elif preprocess_mode == "fixed_window":
+            # 固定窗口切分：2s 窗长 + 1s 重叠（默认）
+            num_peaks = 0
+            cycles = extract_fixed_windows(
+                normalized,
+                sr,
+                window_sec=window_sec,
+                overlap_sec=overlap_sec,
+                target_length=target_cycle_length,
+                padding_mode="zero",
+                drop_last=False,
+            )
+            cycles = [cycle.astype(np.float32) for cycle in cycles]
+            cycles_passed = len(cycles)
+            cycles_failed = 0
+        else:
+            raise ValueError(f"Unknown preprocess_mode: {preprocess_mode}")
+
+        # 第 8 步: 保存
         subject_output_dir = output_dir / subject_id / recording_id
         subject_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        cycles_passed = 0
-        cycles_failed = 0
-        
-        for idx, (_, _, raw_cycle) in enumerate(cycle_segments):
-            # 质量评估
-            quality = assess_cycle_quality(raw_cycle, sr, min_snr_db)
-            
-            if not quality["valid"]:
-                cycles_failed += 1
-                continue
-            
-            cycles_passed += 1
-            cycle = _normalize_length(raw_cycle, target_cycle_length, mode="zero")
-            
-            # 保存周期
-            cycle_path = subject_output_dir / f"cycle_{idx:04d}.npy"
-            np.save(cycle_path, cycle.astype(np.float32))
-            
-            # 可选：保存子结构
-            if save_substructures:
-                subs = split_substructures(cycle, num_substructures)
-                for sub_idx, sub in enumerate(subs):
-                    sub_path = subject_output_dir / f"cycle_{idx:04d}_sub_{sub_idx}.npy"
-                    np.save(sub_path, sub.astype(np.float32))
+
+        if output_format == "npy":
+            for idx, cycle in enumerate(cycles):
+                cycle_path = subject_output_dir / f"cycle_{idx:04d}.npy"
+                np.save(cycle_path, cycle)
+
+                if save_substructures:
+                    subs = split_substructures(cycle, num_substructures)
+                    for sub_idx, sub in enumerate(subs):
+                        sub_path = subject_output_dir / f"cycle_{idx:04d}_sub_{sub_idx}.npy"
+                        np.save(sub_path, sub.astype(np.float32))
+        elif output_format == "hdf5":
+            h5py = _import_h5py()
+            h5_path = subject_output_dir / f"{recording_id}.h5"
+            if len(cycles) > 0:
+                cycles_array = np.stack(cycles, axis=0).astype(np.float32)
+            else:
+                cycles_array = np.empty((0, target_cycle_length), dtype=np.float32)
+
+            with h5py.File(h5_path, "w") as h5f:
+                h5f.create_dataset(
+                    "cycles",
+                    data=cycles_array,
+                    chunks=(max(1, min(256, len(cycles_array))), target_cycle_length),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                h5f.attrs["subject_id"] = subject_id
+                h5f.attrs["recording_id"] = recording_id
+                h5f.attrs["source_file"] = str(file_path)
+                h5f.attrs["sample_rate"] = sr
+                h5f.attrs["preprocess_mode"] = preprocess_mode
+                h5f.attrs["target_cycle_length"] = target_cycle_length
+                h5f.attrs["num_cycles"] = len(cycles)
+                if preprocess_mode == "fixed_window":
+                    h5f.attrs["window_sec"] = window_sec
+                    h5f.attrs["overlap_sec"] = overlap_sec
+
+                if save_substructures and len(cycles) > 0:
+                    subs = [
+                        np.stack(split_substructures(cycle, num_substructures), axis=0)
+                        for cycle in cycles
+                    ]
+                    subs_array = np.stack(subs, axis=0).astype(np.float32)
+                    h5f.create_dataset(
+                        "substructures",
+                        data=subs_array,
+                        chunks=(max(1, min(64, len(subs_array))), num_substructures, subs_array.shape[-1]),
+                        compression="gzip",
+                        compression_opts=4,
+                    )
+        else:
+            raise ValueError(f"Unknown output_format: {output_format}")
         
         processing_time = time.time() - start_time
         
@@ -203,7 +289,7 @@ def process_single_recording(
             original_duration_sec=original_duration,
             sample_rate=sr,
             num_peaks_detected=num_peaks,
-            num_cycles_extracted=len(cycle_segments),
+            num_cycles_extracted=len(cycles),
             num_cycles_passed_quality=cycles_passed,
             num_cycles_failed_quality=cycles_failed,
             processing_time_sec=processing_time,
@@ -250,6 +336,11 @@ def process_all_recordings(
     raw_dir: Path,
     output_dir: Path,
     sample_rate: int = 5000,
+    preprocess_mode: str = "envelope",
+    output_format: str = "npy",
+    fixed_window_sample_rate: int = 2500,
+    window_sec: float = 2.0,
+    overlap_sec: float = 1.0,
     target_cycle_length: int = 4000,
     num_substructures: int = 4,
     min_cycle_duration: float = 0.4,
@@ -264,7 +355,12 @@ def process_all_recordings(
     参数:
         raw_dir: 原始数据目录路径
         output_dir: 输出目录路径
-        sample_rate: 目标采样率
+        sample_rate: 能量包络模式目标采样率
+        preprocess_mode: 预处理模式
+        output_format: 输出格式
+        fixed_window_sample_rate: 固定窗口模式采样率
+        window_sec: 固定窗口长度（秒）
+        overlap_sec: 固定窗口重叠（秒）
         target_cycle_length: 目标周期长度
         num_substructures: 子结构数量
         min_cycle_duration: 最小周期时长
@@ -300,6 +396,11 @@ def process_all_recordings(
             stats = process_single_recording(
                 wav_file, output_dir,
                 sample_rate=sample_rate,
+                preprocess_mode=preprocess_mode,
+                output_format=output_format,
+                fixed_window_sample_rate=fixed_window_sample_rate,
+                window_sec=window_sec,
+                overlap_sec=overlap_sec,
                 target_cycle_length=target_cycle_length,
                 num_substructures=num_substructures,
                 min_cycle_duration=min_cycle_duration,
@@ -323,9 +424,11 @@ def process_all_recordings(
                 executor.submit(
                     process_single_recording,
                     wav_file, output_dir,
-                    sample_rate, target_cycle_length, num_substructures,
+                    sample_rate, preprocess_mode, output_format,
+                    fixed_window_sample_rate, window_sec, overlap_sec,
+                    target_cycle_length, num_substructures,
                     min_cycle_duration, max_cycle_duration, min_snr_db,
-                    save_substructures
+                    save_substructures,
                 ): wav_file
                 for wav_file in wav_files
             }
@@ -380,7 +483,7 @@ def process_all_recordings(
         total_cycles_passed=sum(s.num_cycles_passed_quality for s in successful),
         total_cycles_failed=sum(s.num_cycles_failed_quality for s in successful),
         total_processing_time_sec=total_time,
-        sample_rate=sample_rate,
+        sample_rate=fixed_window_sample_rate if preprocess_mode == "fixed_window" else sample_rate,
         target_cycle_length=target_cycle_length,
         num_substructures=num_substructures
     )
@@ -429,7 +532,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default=None,
+        default="configs/preprocess.yaml",
         help="配置 YAML 文件的路径"
     )
     
@@ -453,6 +556,32 @@ def parse_args():
         type=int,
         default=None,
         help="目标采样率 (Hz)"
+    )
+    parser.add_argument(
+        "--preprocess_mode",
+        type=str,
+        choices=["envelope", "fixed_window"],
+        default=None,
+        help="预处理模式：能量包络或固定窗口"
+    )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        choices=["npy", "hdf5"],
+        default=None,
+        help="预处理结果存储格式"
+    )
+    parser.add_argument(
+        "--window_sec",
+        type=float,
+        default=None,
+        help="固定窗口长度（秒）"
+    )
+    parser.add_argument(
+        "--overlap_sec",
+        type=float,
+        default=None,
+        help="固定窗口重叠（秒）"
     )
     parser.add_argument(
         "--target_length",
@@ -494,15 +623,25 @@ def main():
     args = parse_args()
     
     # 加载配置
-    if args.config is not None:
-        config = load_config(args.config)
-    else:
-        config = load_config()  # 加载默认配置
+    config = load_config(args.config)
+
+    # 兼容旧配置：当字段不存在时使用默认值
+    preprocess_mode_cfg = config.data.get("preprocess_mode", "envelope")
+    output_format_cfg = config.data.get("output_format", "npy")
+    fixed_cfg = config.data.get("fixed_window", {})
+    fixed_window_sr_cfg = fixed_cfg.get("sample_rate", 2500)
+    window_sec_cfg = fixed_cfg.get("window_sec", 2.0)
+    overlap_sec_cfg = fixed_cfg.get("overlap_sec", 1.0)
     
     # 使用命令行参数覆盖
     raw_dir = Path(args.raw_dir) if args.raw_dir else Path(config.data.raw_dir)
     output_dir = Path(args.output_dir) if args.output_dir else Path(config.data.processed_dir)
     sample_rate = args.sample_rate if args.sample_rate else config.data.sample_rate
+    preprocess_mode = args.preprocess_mode if args.preprocess_mode else preprocess_mode_cfg
+    output_format = args.output_format if args.output_format else output_format_cfg
+    fixed_window_sample_rate = fixed_window_sr_cfg
+    window_sec = args.window_sec if args.window_sec is not None else window_sec_cfg
+    overlap_sec = args.overlap_sec if args.overlap_sec is not None else overlap_sec_cfg
     target_length = args.target_length if args.target_length else config.data.cycle.target_length
     num_substructures = args.num_substructures if args.num_substructures else config.data.num_substructures
     min_snr = args.min_snr if args.min_snr else config.data.filter.min_snr_db
@@ -526,8 +665,15 @@ def main():
     print("=" * 50)
     print(f"Raw data directory: {raw_dir}")
     print(f"Output directory: {output_dir}")
-    print(f"Sample rate: {sample_rate} Hz")
-    print(f"Target cycle length: {target_length} samples ({target_length/sample_rate:.3f} sec)")
+    print(f"Preprocess mode: {preprocess_mode}")
+    if preprocess_mode == "fixed_window":
+        print(f"Sample rate: {fixed_window_sample_rate} Hz")
+        print(f"Window: {window_sec:.3f} sec, overlap: {overlap_sec:.3f} sec")
+    else:
+        print(f"Sample rate: {sample_rate} Hz")
+    print(f"Output format: {output_format}")
+    effective_sr_for_length = fixed_window_sample_rate if preprocess_mode == "fixed_window" else sample_rate
+    print(f"Target cycle length: {target_length} samples ({target_length/effective_sr_for_length:.3f} sec)")
     print(f"Number of substructures: {num_substructures}")
     print(f"Minimum SNR: {min_snr} dB")
     print(f"Number of workers: {num_workers}")
@@ -538,6 +684,11 @@ def main():
         raw_dir=raw_dir,
         output_dir=output_dir,
         sample_rate=sample_rate,
+        preprocess_mode=preprocess_mode,
+        output_format=output_format,
+        fixed_window_sample_rate=fixed_window_sample_rate,
+        window_sec=window_sec,
+        overlap_sec=overlap_sec,
         target_cycle_length=target_length,
         num_substructures=num_substructures,
         min_cycle_duration=config.data.cycle.min_duration,

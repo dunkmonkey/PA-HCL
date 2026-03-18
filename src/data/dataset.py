@@ -17,6 +17,7 @@ PA-HCL 预训练和下游任务的数据集类。
 """
 
 import csv
+import importlib
 import json
 import random
 from pathlib import Path
@@ -33,6 +34,16 @@ from .preprocessing import (
     split_substructures,
 )
 from .transforms import Compose, get_pretrain_transforms, get_eval_transforms
+
+
+def _import_h5py():
+    """按需导入 h5py，并在缺失时给出明确提示。"""
+    try:
+        return importlib.import_module("h5py")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Reading .h5 preprocessed cycles requires 'h5py' in the active environment."
+        ) from exc
 
 
 # ============== Pretraining Dataset ==============
@@ -105,8 +116,9 @@ class PCGPretrainDataset(Dataset):
         
         # Collect all cycle files
         self.cycle_files = self._collect_cycle_files()
+        self.sample_index = self._build_sample_index(self.cycle_files)
         
-        if len(self.cycle_files) == 0:
+        if len(self.sample_index) == 0:
             raise ValueError(f"No cycle files found in {data_dir}")
         
         # GPU augmentation mode
@@ -131,25 +143,51 @@ class PCGPretrainDataset(Dataset):
         """
         cycle_files = []
         
-        # Support both .npy and .pt formats
-        for ext in ["*.npy", "*.pt"]:
+        # Support .npy, .pt, and .h5 formats
+        for ext in ["*.npy", "*.pt", "*.h5"]:
             cycle_files.extend(self.data_dir.rglob(ext))
         
         # Sort for reproducibility
         cycle_files = sorted(cycle_files)
         
         return cycle_files
+
+    def _build_sample_index(
+        self,
+        cycle_files: List[Path]
+    ) -> List[Tuple[Path, Optional[int]]]:
+        """
+        构建样本索引。
+
+        对 .npy/.pt 文件，每个文件对应一个样本；
+        对 .h5 文件，展开其中 cycles 数据集的每一行为一个样本。
+        """
+        sample_index: List[Tuple[Path, Optional[int]]] = []
+
+        for file_path in cycle_files:
+            if file_path.suffix == ".h5":
+                h5py = _import_h5py()
+                with h5py.File(file_path, "r") as h5f:
+                    if "cycles" not in h5f:
+                        continue
+                    num_cycles = int(h5f["cycles"].shape[0])
+                for row_idx in range(num_cycles):
+                    sample_index.append((file_path, row_idx))
+            else:
+                sample_index.append((file_path, None))
+
+        return sample_index
     
     def _load_all_to_memory(self) -> None:
         """将所有周期文件加载到内存以加快访问速度。"""
-        print(f"Loading {len(self.cycle_files)} cycles into memory...")
-        for idx, file_path in enumerate(self.cycle_files):
-            self.cache[idx] = self._load_cycle(file_path)
+        print(f"Loading {len(self.sample_index)} cycles into memory...")
+        for idx, (file_path, row_idx) in enumerate(self.sample_index):
+            self.cache[idx] = self._load_cycle(file_path, row_idx)
             if (idx + 1) % 1000 == 0:
-                print(f"  Loaded {idx + 1}/{len(self.cycle_files)} cycles")
+                print(f"  Loaded {idx + 1}/{len(self.sample_index)} cycles")
         print("Done loading data into memory.")
     
-    def _load_cycle(self, file_path: Path) -> np.ndarray:
+    def _load_cycle(self, file_path: Path, row_idx: Optional[int] = None) -> np.ndarray:
         """
         从文件加载单个心动周期。
         
@@ -163,6 +201,14 @@ class PCGPretrainDataset(Dataset):
             cycle = np.load(file_path)
         elif file_path.suffix == ".pt":
             cycle = torch.load(file_path).numpy()
+        elif file_path.suffix == ".h5":
+            if row_idx is None:
+                raise ValueError(f"row_idx is required for h5 sample: {file_path}")
+            h5py = _import_h5py()
+            with h5py.File(file_path, "r") as h5f:
+                if "cycles" not in h5f:
+                    raise ValueError(f"Missing 'cycles' dataset in {file_path}")
+                cycle = np.asarray(h5f["cycles"][row_idx])
         else:
             raise ValueError(f"Unsupported file format: {file_path.suffix}")
         
@@ -191,7 +237,7 @@ class PCGPretrainDataset(Dataset):
     
     def __len__(self) -> int:
         """返回数据集中心动周期的数量。"""
-        return len(self.cycle_files)
+        return len(self.sample_index)
     
     def refresh_view_cache(self, epoch: int, force: bool = False) -> None:
         """
@@ -222,12 +268,13 @@ class PCGPretrainDataset(Dataset):
         print(f"Refreshing view cache at epoch {epoch}...")
         self.view_cache.clear()
         
-        for idx in range(len(self.cycle_files)):
+        for idx in range(len(self.sample_index)):
             # 获取原始周期
             if self.cache_in_memory and idx in self.cache:
                 cycle = self.cache[idx].copy()
             else:
-                cycle = self._load_cycle(self.cycle_files[idx])
+                file_path, row_idx = self.sample_index[idx]
+                cycle = self._load_cycle(file_path, row_idx)
             
             # 生成两个增强视图
             view1 = self.transform(cycle.copy(), self.sample_rate)
@@ -240,7 +287,7 @@ class PCGPretrainDataset(Dataset):
             self.view_cache[idx] = (view1, view2, subs1, subs2)
             
             if (idx + 1) % 1000 == 0:
-                print(f"  Cached {idx + 1}/{len(self.cycle_files)} views")
+                print(f"  Cached {idx + 1}/{len(self.sample_index)} views")
         
         self.current_cache_epoch = epoch
         print(f"View cache refreshed: {len(self.view_cache)} samples cached.")
@@ -271,7 +318,8 @@ class PCGPretrainDataset(Dataset):
             if self.cache_in_memory and idx in self.cache:
                 cycle = self.cache[idx].copy()
             else:
-                cycle = self._load_cycle(self.cycle_files[idx])
+                file_path, row_idx = self.sample_index[idx]
+                cycle = self._load_cycle(file_path, row_idx)
             
             # 转为张量 [1, T]
             cycle_tensor = torch.from_numpy(cycle).float().unsqueeze(0)
@@ -307,7 +355,8 @@ class PCGPretrainDataset(Dataset):
         if self.cache_in_memory and idx in self.cache:
             cycle = self.cache[idx].copy()
         else:
-            cycle = self._load_cycle(self.cycle_files[idx])
+            file_path, row_idx = self.sample_index[idx]
+            cycle = self._load_cycle(file_path, row_idx)
         
         # Apply augmentations to create two views
         view1 = self.transform(cycle.copy(), self.sample_rate)
@@ -346,7 +395,7 @@ class PCGPretrainDataset(Dataset):
         返回:
             受试者 ID 字符串
         """
-        file_path = self.cycle_files[idx]
+        file_path = self.sample_index[idx][0]
         # Assuming structure: data_dir/subject_id/rec_id/cycle_xxx.npy
         parts = file_path.relative_to(self.data_dir).parts
         if len(parts) >= 1:
@@ -482,7 +531,7 @@ class PCGDownstreamDataset(Dataset):
     def _load_samples(
         self,
         csv_path: Optional[Union[str, Path]]
-    ) -> Tuple[List[Tuple[Path, str, Optional[str]]], Optional[List[float]]]:
+    ) -> Tuple[List[Tuple[Path, str, Optional[str], Optional[int]]], Optional[List[float]]]:
         """
         加载样本路径和标签。
         
@@ -531,6 +580,17 @@ class PCGDownstreamDataset(Dataset):
                     
                     subject_id = row.get('subject_id', '')
                     
+                    # 支持 h5 周期索引路径：path/to/file.h5::123
+                    h5_cycle_idx: Optional[int] = None
+                    if "::" in file_path_str:
+                        base_path_str, idx_str = file_path_str.rsplit("::", 1)
+                        try:
+                            h5_cycle_idx = int(idx_str)
+                            file_path_str = base_path_str
+                        except ValueError:
+                            # 非法索引时回退为普通路径
+                            h5_cycle_idx = None
+
                     # 构建完整路径
                     file_path = self.data_dir / file_path_str
                     if not file_path.exists():
@@ -539,16 +599,18 @@ class PCGDownstreamDataset(Dataset):
                         if not file_path.exists():
                             continue
                     
-                    samples.append((file_path, str(label), subject_id))
+                    samples.append((file_path, str(label), subject_id, h5_cycle_idx))
         else:
             # Try directory-based organization
             for label_dir in self.data_dir.iterdir():
                 if label_dir.is_dir():
                     label = label_dir.name
                     for file_path in label_dir.glob("*.wav"):
-                        samples.append((file_path, label, ""))
+                        samples.append((file_path, label, "", None))
                     for file_path in label_dir.glob("*.npy"):
-                        samples.append((file_path, label, ""))
+                        samples.append((file_path, label, "", None))
+                    for file_path in label_dir.glob("*.h5"):
+                        samples.append((file_path, label, "", 0))
         
         if len(samples) == 0:
             raise ValueError(f"No samples found in {self.data_dir}")
@@ -565,15 +627,16 @@ class PCGDownstreamDataset(Dataset):
         print(f"Loading {len(self.samples)} signals into memory...")
         for idx in range(len(self.samples)):
             file_path = self.samples[idx][0]
+            h5_cycle_idx = self.samples[idx][3] if len(self.samples[idx]) > 3 else None
             try:
-                self.signal_cache[idx] = self._load_signal(file_path)
+                self.signal_cache[idx] = self._load_signal(file_path, h5_cycle_idx)
             except Exception as e:
                 print(f"  Warning: Failed to load {file_path}: {e}")
             if (idx + 1) % 500 == 0:
                 print(f"  Loaded {idx + 1}/{len(self.samples)} signals")
         print(f"Done loading {len(self.signal_cache)} signals into memory.")
     
-    def _load_signal(self, file_path: Path) -> np.ndarray:
+    def _load_signal(self, file_path: Path, h5_cycle_idx: Optional[int] = None) -> np.ndarray:
         """加载和预处理信号文件。"""
         if file_path.suffix == ".wav":
             audio, sr = load_audio(file_path, target_sr=self.sample_rate)
@@ -585,6 +648,16 @@ class PCGDownstreamDataset(Dataset):
             audio = np.load(file_path).astype(np.float32)
         elif file_path.suffix == ".pt":
             audio = torch.load(file_path).numpy().astype(np.float32)
+        elif file_path.suffix == ".h5":
+            if h5_cycle_idx is None:
+                raise ValueError(f"Missing cycle index for h5 sample: {file_path}")
+            h5py = _import_h5py()
+            with h5py.File(file_path, "r") as h5f:
+                if "cycles" not in h5f:
+                    raise ValueError(f"Missing 'cycles' dataset in {file_path}")
+                if h5_cycle_idx < 0 or h5_cycle_idx >= int(h5f["cycles"].shape[0]):
+                    raise IndexError(f"h5 cycle index out of range: {h5_cycle_idx}")
+                audio = np.asarray(h5f["cycles"][h5_cycle_idx]).astype(np.float32)
         else:
             raise ValueError(f"Unsupported format: {file_path.suffix}")
         
@@ -627,7 +700,8 @@ class PCGDownstreamDataset(Dataset):
         if self.cache_in_memory and idx in self.signal_cache:
             signal = self.signal_cache[idx].copy()
         else:
-            signal = self._load_signal(file_path)
+            h5_cycle_idx = sample[3] if len(sample) > 3 else None
+            signal = self._load_signal(file_path, h5_cycle_idx)
         
         # GPU 增强模式: 跳过 CPU 增强，增强在 GPU 上批量进行
         if not self.use_gpu_augment and self.transform is not None:

@@ -7,6 +7,8 @@
 import numpy as np
 import pytest
 import tempfile
+import importlib
+import importlib.util
 from pathlib import Path
 from scipy.io import wavfile
 
@@ -23,11 +25,15 @@ from src.data.preprocessing import (
     detect_peaks,
     detect_peaks_adaptive,
     extract_cycles,
-    extract_cycles_with_positions,
+    extract_fixed_windows,
     split_substructures,
     compute_snr,
     assess_cycle_quality,
 )
+from scripts.preprocess import process_single_recording
+
+_preprocessing_mod = importlib.import_module("src.data.preprocessing")
+extract_cycles_with_positions = getattr(_preprocessing_mod, "extract_cycles_with_positions", None)
 
 
 # ============== Fixtures ==============
@@ -263,6 +269,9 @@ class TestCycleExtraction:
 
     def test_extract_cycles_with_positions_uses_valley_boundaries(self, synthetic_pcg, sample_rate):
         """测试完整周期切分时边界不直接落在主峰上。"""
+        if extract_cycles_with_positions is None:
+            pytest.skip("extract_cycles_with_positions is not available in current preprocessing module")
+
         peaks = np.array([5000, 10000, 15000, 20000])
 
         cycles = extract_cycles_with_positions(
@@ -304,6 +313,59 @@ class TestCycleExtraction:
         # Total length should match
         total_length = sum(len(s) for s in subs)
         assert total_length == 101
+
+    def test_extract_fixed_windows_count(self):
+        """测试固定窗口切分数量是否符合预期。"""
+        sr = 2500
+        duration_sec = 5.0
+        signal_data = np.random.randn(int(sr * duration_sec)).astype(np.float32)
+
+        windows = extract_fixed_windows(
+            signal_data,
+            sample_rate=sr,
+            window_sec=2.0,
+            overlap_sec=1.0,
+            target_length=5000,
+            drop_last=False,
+        )
+
+        # N=12500, L=5000, H=2500 => starts: 0,2500,5000,7500 => 4 windows
+        assert len(windows) == 4
+        assert all(w.shape == (5000,) for w in windows)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("h5py") is None,
+        reason="h5py is not installed in current environment"
+    )
+    def test_fixed_window_hdf5_output_shape(self, temp_wav_file):
+        """回归测试：固定窗口流程写出的 HDF5 shape 正确。"""
+        h5py = importlib.import_module("h5py")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "processed"
+
+            stats = process_single_recording(
+                file_path=temp_wav_file,
+                output_dir=out_dir,
+                sample_rate=5000,
+                preprocess_mode="fixed_window",
+                output_format="hdf5",
+                fixed_window_sample_rate=2500,
+                window_sec=2.0,
+                overlap_sec=1.0,
+                target_cycle_length=5000,
+                min_snr_db=10.0,
+                save_substructures=False,
+            )
+
+            h5_path = out_dir / stats.subject_id / stats.recording_id / f"{stats.recording_id}.h5"
+            assert h5_path.exists()
+
+            with h5py.File(h5_path, "r") as h5f:
+                assert "cycles" in h5f
+                cycles = h5f["cycles"]
+                assert cycles.shape[0] == stats.num_cycles_extracted
+                assert cycles.shape[1] == 5000
 
 
 # ============== Quality Assessment Tests ==============

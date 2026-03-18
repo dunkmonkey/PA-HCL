@@ -46,8 +46,9 @@ sys.path.insert(0, str(project_root))
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from omegaconf import OmegaConf
 
-from src.config import load_config, print_config
+from src.config import load_config, save_config, build_effective_run_config, build_config_summary
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 from src.data.dataset import PCGDownstreamDataset
@@ -269,23 +270,25 @@ def parse_args():
 
 def load_task_config(args):
     """加载任务配置。"""
-    from omegaconf import OmegaConf
-    
     # 加载基础配置
     config = load_config(args.config)
     
     # 加载任务特定配置
     task_config_path = project_root / "configs" / "tasks" / f"{args.task}.yaml"
     if task_config_path.exists():
-        task_config = load_config(str(task_config_path))
-        
-        # 使用 OmegaConf.merge 合并配置（任务配置优先）
+        task_config = OmegaConf.load(task_config_path)
+        task_cfg_container = OmegaConf.to_container(task_config, resolve=False)
+        if isinstance(task_cfg_container, dict) and "defaults" in task_cfg_container:
+            task_cfg_container.pop("defaults", None)
+            task_config = OmegaConf.create(task_cfg_container)
+
+        # 任务配置优先，避免重复加载 default.yaml 造成同义字段并存
         config = OmegaConf.merge(config, task_config)
     
     return config
 
 
-def create_dataloaders(config, args, logger):
+def create_dataloaders(config, args, logger, use_gpu_augment: bool = False):
     """创建训练、验证和测试数据加载器。"""
     from torch.utils.data import WeightedRandomSampler
     
@@ -316,6 +319,7 @@ def create_dataloaders(config, args, logger):
         target_length=config.data.target_length,
         mode='train',
         cache_in_memory=True,
+        use_gpu_augment=use_gpu_augment,
     )
     
     val_dataset = PCGDownstreamDataset(
@@ -325,6 +329,7 @@ def create_dataloaders(config, args, logger):
         target_length=config.data.target_length,
         mode='val',
         cache_in_memory=True,
+        use_gpu_augment=use_gpu_augment,
     )
     
     test_dataset = PCGDownstreamDataset(
@@ -334,6 +339,7 @@ def create_dataloaders(config, args, logger):
         target_length=config.data.target_length,
         mode='val',  # 测试集使用 'val' 模式（不进行数据增强）
         cache_in_memory=True,
+        use_gpu_augment=use_gpu_augment,
     )
     
     logger.info(f"训练样本数: {len(train_dataset)}")
@@ -578,19 +584,30 @@ def main():
             "如需提升速度，可使用 --no-deterministic 参数禁用确定性模式。"
         )
     
-    # 打印配置
-    print_config(config)
+    # 打印精简的有效配置
+    effective_config = build_effective_run_config(config, stage="supervised")
+    config_summary = build_config_summary(config, stage="supervised")
+    logger.info("配置摘要（统一模板）:\n%s", OmegaConf.to_yaml(config_summary, resolve=True))
     
-    # 保存配置
-    from omegaconf import OmegaConf
-    config_save_path = output_dir / "config.yaml"
-    with open(config_save_path, 'w') as f:
-        OmegaConf.save(config, f)
-    logger.info(f"配置已保存到: {config_save_path}")
+    # 保存配置（完整解析配置 + 有效运行配置）
+    resolved_config_path = output_dir / "resolved_config.yaml"
+    effective_config_path = output_dir / "effective_config.yaml"
+    save_config(config, resolved_config_path)
+    save_config(effective_config, effective_config_path)
+    logger.info(f"完整解析配置已保存到: {resolved_config_path}")
+    logger.info(f"有效运行配置已保存到: {effective_config_path}")
     
+    # 检查是否启用 GPU 增强（单路径：CPU 或 GPU 二选一）
+    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
+    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
+        use_gpu_augment = config.data_cache.use_gpu_augment
+
+    if use_gpu_augment:
+        logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
+
     # 创建数据加载器
     train_loader, val_loader, test_loader, train_dataset, val_dataset, test_dataset = create_dataloaders(
-        config, args, logger
+        config, args, logger, use_gpu_augment=use_gpu_augment
     )
     
     # 获取类别数
@@ -608,14 +625,6 @@ def main():
     
     # 导入训练器
     from src.trainers.downstream_trainer import DownstreamTrainer
-    
-    # 检查是否启用 GPU 增强
-    use_gpu_augment = True  # 默认启用 GPU 增强以提升训练速度
-    if hasattr(config, 'data_cache') and hasattr(config.data_cache, 'use_gpu_augment'):
-        use_gpu_augment = config.data_cache.use_gpu_augment
-    
-    if use_gpu_augment:
-        logger.info("GPU 批量增强已启用 - 数据增强将在 GPU 上批量执行")
     
     # 创建训练器
     trainer = DownstreamTrainer(
@@ -648,7 +657,6 @@ def main():
             logger.info(f"  {metric_name}: {metric_value:.4f}")
         
         # 保存最终结果
-        from omegaconf import OmegaConf
         results = {
             "task": args.task,
             "encoder_type": config.model.encoder_type,

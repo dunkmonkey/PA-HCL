@@ -409,6 +409,9 @@ class PretrainTrainer:
         num_batches = 0
         
         epoch_start = time.time()
+        num_substructures = 4
+        if self.config is not None and hasattr(self.config, 'data'):
+            num_substructures = getattr(self.config.data, 'num_substructures', 4)
         
         for batch_idx, batch in enumerate(self.train_loader):
             # Move data to device
@@ -421,15 +424,14 @@ class PretrainTrainer:
             if self.use_gpu_augment and self.gpu_augment is not None:
                 view1 = self.gpu_augment(view1)
                 view2 = self.gpu_augment(view2)
-                # GPU 增强模式下，子结构在增强后分割
-                if subs1 is None or subs2 is None:
-                    from ..data.preprocessing import split_substructures_batch
-                    subs1 = split_substructures_batch(view1, num_substructures=4)
-                    subs2 = split_substructures_batch(view2, num_substructures=4)
+                # GPU 单路径模式下，始终从增强后的 view 分割子结构，避免 view/subs 不一致
+                from ..data.preprocessing import split_substructures_batch
+                subs1 = split_substructures_batch(view1, num_substructures=num_substructures)
+                subs2 = split_substructures_batch(view2, num_substructures=num_substructures)
             
-            if subs1 is not None and not isinstance(subs1, torch.Tensor):
+            if subs1 is not None and isinstance(subs1, torch.Tensor):
                 subs1 = subs1.to(self.device, non_blocking=True)
-            if subs2 is not None and not isinstance(subs2, torch.Tensor):
+            if subs2 is not None and isinstance(subs2, torch.Tensor):
                 subs2 = subs2.to(self.device, non_blocking=True)
             
             # Forward pass with AMP

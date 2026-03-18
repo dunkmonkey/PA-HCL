@@ -1,0 +1,28 @@
+# PA-HCL 数据预处理专用配置
+# 仅保留 scripts/preprocess.py 实际使用的参数
+
+data:
+  raw_dir: "/root/autodl-tmp/data/raw"
+  processed_dir: "/root/autodl-tmp/data/processed"
+
+  # 预处理模式: envelope(原流程) / fixed_window(固定窗口流程)
+  preprocess_mode: "envelope"
+  # 存储格式: npy / hdf5
+  output_format: "npy"
+
+  sample_rate: 5000
+
+  fixed_window:
+    sample_rate: 2500
+    window_sec: 2.0
+    overlap_sec: 1.0
+
+  cycle:
+    min_duration: 0.4
+    max_duration: 1.2
+    target_length: 4000
+
+  num_substructures: 4
+
+  filter:
+    min_snr_db: 10.0
