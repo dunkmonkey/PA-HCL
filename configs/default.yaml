@@ -40,7 +40,7 @@ augmentation:
 # ============== 模型 ==============
 model:
   # 编码器类型
-  encoder_type: "cnn_mamba"  # cnn_mamba / cnn_transformer / cnn_only / sincnet_eca_mamba
+  encoder_type: "cnn_mamba"  # cnn_mamba / sincnet_eca_mamba
   
   # CNN 主干
   cnn_channels: [32, 64, 128, 256]
@@ -68,17 +68,20 @@ model:
   moco_momentum: 0.999
   queue_size: 8192
   
-  # SincNet + ECA + ASP + Mamba 编码器 (轻量版本)
+  # SinCNeXt-BM 编码器（覆盖原 sincnet_eca_mamba）
   # encoder_type: "sincnet_eca_mamba" 时启用
   sinc_out_channels: 64
   sinc_kernel_size: 251
-  sinc_stride: 2
-  stage1_channels: [64, 96]
-  stage2_channels: [96, 128]
+  sinc_stride: 1
+  sinc_min_low_hz: 20.0
+  sinc_min_band_hz: 20.0
+  sinc_max_high_hz: 500.0
+  local_dim: 128
+  convnext_kernel_size: 7
+  convnext_expansion: 4
   use_groupnorm: true
   num_groups: 8
-  eca_kernel_size: 3
-  cycle_output_dim: 192
+  cycle_output_dim: 256
   
 # ============== 分类器（下游任务用） ==============
 classifier:

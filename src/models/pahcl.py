@@ -45,9 +45,27 @@ class PAHCLModel(nn.Module):
         mamba_d_model: int = 256,
         mamba_n_layers: int = 4,
         mamba_d_state: int = 8,
+        mamba_d_conv: int = 4,
         mamba_expand: int = 2,
         mamba_dropout: float = 0.1,
         pool_type: str = "mean",
+        # SinCNeXt-BM 设置（用于 sincnet_eca_mamba）
+        sinc_out_channels: int = 64,
+        sinc_kernel_size: int = 251,
+        sinc_stride: int = 1,
+        sinc_min_low_hz: float = 20.0,
+        sinc_min_band_hz: float = 20.0,
+        sinc_max_high_hz: float = 500.0,
+        local_dim: int = 128,
+        convnext_kernel_size: int = 7,
+        convnext_expansion: int = 4,
+        drop_path_rate: float = 0.1,
+        use_bidirectional: bool = True,
+        bidirectional_fusion: str = "add",
+        cycle_output_dim: int = 256,
+        use_groupnorm: bool = True,
+        num_groups: int = 8,
+        sample_rate: int = 5000,
         # 投影头设置
         cycle_proj_hidden: int = 128,
         cycle_proj_output: int = 32,
@@ -63,7 +81,7 @@ class PAHCLModel(nn.Module):
     ):
         """
         参数:
-            encoder_type: 编码器类型 ("cnn_mamba", "cnn_transformer", "cnn_only")
+            encoder_type: 编码器类型 ("cnn_mamba", "sincnet_eca_mamba")
             in_channels: 输入通道数
             cnn_channels: CNN 层通道数
             cnn_kernel_sizes: CNN 卷积核大小
@@ -103,6 +121,34 @@ class PAHCLModel(nn.Module):
         if cnn_strides is None:
             cnn_strides = [2] * len(cnn_channels)
 
+        sinc_encoder_kwargs = {
+            "in_channels": in_channels,
+            "sinc_out_channels": sinc_out_channels,
+            "sinc_kernel_size": sinc_kernel_size,
+            "sinc_stride": sinc_stride,
+            "sinc_min_low_hz": sinc_min_low_hz,
+            "sinc_min_band_hz": sinc_min_band_hz,
+            "sinc_max_high_hz": sinc_max_high_hz,
+            "local_dim": local_dim,
+            "convnext_kernel_size": convnext_kernel_size,
+            "convnext_expansion": convnext_expansion,
+            "mamba_d_model": mamba_d_model,
+            "mamba_n_layers": mamba_n_layers,
+            "mamba_d_state": mamba_d_state,
+            "mamba_d_conv": mamba_d_conv,
+            "mamba_expand": mamba_expand,
+            "mamba_dropout": mamba_dropout,
+            "drop_path_rate": drop_path_rate,
+            "cycle_output_dim": cycle_output_dim,
+            "num_substructures": num_substructures,
+            "pool_type": pool_type,
+            "use_bidirectional": use_bidirectional,
+            "bidirectional_fusion": bidirectional_fusion,
+            "sample_rate": sample_rate,
+            "use_groupnorm": use_groupnorm,
+            "num_groups": num_groups,
+        }
+
         # 构建编码器
         if encoder_type == "cnn_mamba":
             self.encoder = CNNMambaEncoder(
@@ -122,20 +168,9 @@ class PAHCLModel(nn.Module):
             # 子结构特征维度来自倒数第二层 CNN 层
             sub_feature_dim = cnn_channels[-2] if len(cnn_channels) >= 2 else cnn_channels[-1]
         elif encoder_type == "sincnet_eca_mamba":
-            # 新的优化编码器
-            self.encoder = build_encoder(encoder_type, **{
-                "in_channels": in_channels,
-                "mamba_d_model": mamba_d_model,
-                "mamba_n_layers": mamba_n_layers,
-                "mamba_d_state": mamba_d_state,
-                "mamba_expand": mamba_expand,
-                "mamba_dropout": mamba_dropout,
-                "pool_type": pool_type
-            })
-            # 新编码器输出 192 维（周期级特征）
-            encoder_out_dim = getattr(self.encoder, 'cycle_output_dim', 192)
-            # 子结构特征维度为 128（Stage 2 输出）
-            sub_feature_dim = 128
+            self.encoder = build_encoder(encoder_type, **sinc_encoder_kwargs)
+            encoder_out_dim = getattr(self.encoder, 'out_dim', getattr(self.encoder, 'cycle_output_dim', cycle_output_dim))
+            sub_feature_dim = getattr(self.encoder, 'sub_feature_dim', mamba_d_model)
         else:
             self.encoder = build_encoder(encoder_type, **{
                 "in_channels": in_channels,
@@ -172,15 +207,7 @@ class PAHCLModel(nn.Module):
                     pool_type=pool_type
                 )
             elif encoder_type == "sincnet_eca_mamba":
-                self.encoder_momentum = build_encoder(encoder_type, **{
-                    "in_channels": in_channels,
-                    "mamba_d_model": mamba_d_model,
-                    "mamba_n_layers": mamba_n_layers,
-                    "mamba_d_state": mamba_d_state,
-                    "mamba_expand": mamba_expand,
-                    "mamba_dropout": mamba_dropout,
-                    "pool_type": pool_type
-                })
+                self.encoder_momentum = build_encoder(encoder_type, **sinc_encoder_kwargs)
             else:
                 self.encoder_momentum = build_encoder(encoder_type, **{
                     "in_channels": in_channels,
@@ -379,9 +406,21 @@ class PAHCLModel(nn.Module):
         # 重塑以进行批量处理
         subs_flat = subs.reshape(B * K, 1, L)
         
-        # 仅使用 CNN 主干获取特征（取倒数第二层以匹配子结构通道维度）
-        _, intermediates = self.encoder.cnn(subs_flat, return_intermediate=True)
-        sub_feats = intermediates[-2] if len(intermediates) >= 2 else intermediates[-1]
+        # 优先使用统一接口，避免依赖具体编码器内部结构
+        if hasattr(self.encoder, "get_sub_features"):
+            sub_feats = self.encoder.get_sub_features(subs_flat)
+            if sub_feats.dim() == 2:
+                sub_feats = sub_feats.unsqueeze(-1)
+        else:
+            # 兼容回退分支
+            encoder_out = self.encoder(subs_flat, return_intermediate=True)
+            if isinstance(encoder_out, dict) and "sub_features" in encoder_out:
+                sub_feats = encoder_out["sub_features"]
+                if sub_feats.dim() == 4:
+                    # [B*K, K, C, L] -> [B*K, C, L]，仅取首个子结构维
+                    sub_feats = sub_feats[:, 0]
+            else:
+                raise RuntimeError("当前编码器不支持子结构特征提取")
 
         # 重塑回来
         C_out = sub_feats.shape[1]
@@ -501,29 +540,81 @@ def build_pahcl_model(config) -> PAHCLModel:
         
     返回:
         PAHCLModel 实例
+        
+    限制:
+        - 仅支持 "cnn_mamba" 和 "sincnet_eca_mamba" 用于预训练
+        - "resnet34_1d" 编码器仅用于监督学习基线
     """
+    model_cfg = config.model
+    encoder_type = getattr(model_cfg, 'encoder_type', 'cnn_mamba')
+    
+    # ========== 防护：检查不支持的编码器类型 ==========
+    if encoder_type == "resnet34_1d":
+        raise NotImplementedError(
+            f"\n错误：编码器类型 '{encoder_type}' 当前仅支持监督学习基线训练。\n"
+            f"\n支持场景：\n"
+            f"  ✓ 监督学习基线：python scripts/train_supervised_baseline.py --encoder-type resnet34_1d\n\n"
+            f"不支持场景：\n"
+            f"  ✗ 预训练：resnet34_1d 无法用于 pretrain.py\n"
+            f"  ✗ 微调：resnet34_1d 无法用于 finetune.py（需要预训练权重）\n\n"
+            f"如需支持 ResNet 预训练和微调，请向开发团队反馈。"
+        )
+    
+    encoder_prefix = 'sinc' if encoder_type == 'sincnet_eca_mamba' else 'cnn'
+
+    def _cfg(
+        key: str,
+        default,
+        encoder_key: Optional[str] = None,
+    ):
+        """读取配置项，优先使用编码器专属键，再回退到通用键。"""
+        if encoder_key is not None:
+            encoder_value = getattr(model_cfg, encoder_key, None)
+            if encoder_value is not None:
+                return encoder_value
+
+        value = getattr(model_cfg, key, None)
+        return default if value is None else value
+
     return PAHCLModel(
-        encoder_type=getattr(config.model, 'encoder_type', 'cnn_mamba'),
+        encoder_type=encoder_type,
         in_channels=1,
-        cnn_channels=getattr(config.model, 'cnn_channels', [32, 64, 128, 256]),
-        cnn_kernel_sizes=getattr(config.model, 'cnn_kernel_sizes', [7, 5, 5, 3]),
-        cnn_strides=getattr(config.model, 'cnn_strides', [2, 2, 2, 2]),
-        cnn_dropout=getattr(config.model, 'cnn_dropout', 0.1),
-        mamba_d_model=getattr(config.model, 'mamba_d_model', 256),
-        mamba_n_layers=getattr(config.model, 'mamba_n_layers', 4),
-        mamba_d_state=getattr(config.model, 'mamba_d_state', 16),
-        mamba_expand=getattr(config.model, 'mamba_expand', 2),
-        mamba_dropout=getattr(config.model, 'mamba_dropout', 0.1),
-        pool_type=getattr(config.model, 'pool_type', 'mean'),
-        cycle_proj_hidden=getattr(config.model, 'proj_hidden_dim', 512),
-        cycle_proj_output=getattr(config.model, 'proj_output_dim', 128),
-        cycle_proj_layers=getattr(config.model, 'proj_num_layers', 2),
-        sub_proj_hidden=getattr(config.model, 'sub_proj_hidden_dim', 256),
-        sub_proj_output=getattr(config.model, 'sub_proj_output_dim', 64),
+        cnn_channels=_cfg('cnn_channels', [32, 64, 128, 256]),
+        cnn_kernel_sizes=_cfg('cnn_kernel_sizes', [7, 5, 5, 3]),
+        cnn_strides=_cfg('cnn_strides', [2, 2, 2, 2]),
+        cnn_dropout=_cfg('cnn_dropout', 0.1),
+        mamba_d_model=_cfg('mamba_d_model', 256, f'{encoder_prefix}_mamba_d_model'),
+        mamba_n_layers=_cfg('mamba_n_layers', 4, f'{encoder_prefix}_mamba_n_layers'),
+        mamba_d_state=_cfg('mamba_d_state', 16, f'{encoder_prefix}_mamba_d_state'),
+        mamba_d_conv=_cfg('mamba_d_conv', 4, f'{encoder_prefix}_mamba_d_conv'),
+        mamba_expand=_cfg('mamba_expand', 2, f'{encoder_prefix}_mamba_expand'),
+        mamba_dropout=_cfg('mamba_dropout', 0.1, f'{encoder_prefix}_mamba_dropout'),
+        pool_type=_cfg('pool_type', 'mean', f'{encoder_prefix}_pool_type'),
+        sinc_out_channels=_cfg('sinc_out_channels', 64),
+        sinc_kernel_size=_cfg('sinc_kernel_size', 251),
+        sinc_stride=_cfg('sinc_stride', 1),
+        sinc_min_low_hz=_cfg('sinc_min_low_hz', 20.0),
+        sinc_min_band_hz=_cfg('sinc_min_band_hz', 20.0),
+        sinc_max_high_hz=_cfg('sinc_max_high_hz', 500.0),
+        local_dim=_cfg('local_dim', 128),
+        convnext_kernel_size=_cfg('convnext_kernel_size', 7),
+        convnext_expansion=_cfg('convnext_expansion', 4),
+        drop_path_rate=_cfg('drop_path_rate', 0.1),
+        use_bidirectional=_cfg('use_bidirectional', True),
+        bidirectional_fusion=_cfg('bidirectional_fusion', 'add'),
+        cycle_output_dim=_cfg('cycle_output_dim', 256),
+        use_groupnorm=_cfg('use_groupnorm', True),
+        num_groups=_cfg('num_groups', 8),
+        sample_rate=getattr(config.data, 'sample_rate', 5000),
+        cycle_proj_hidden=_cfg('proj_hidden_dim', 512),
+        cycle_proj_output=_cfg('proj_output_dim', 128),
+        cycle_proj_layers=_cfg('proj_num_layers', 2),
+        sub_proj_hidden=_cfg('sub_proj_hidden_dim', 256),
+        sub_proj_output=_cfg('sub_proj_output_dim', 64),
         num_substructures=getattr(config.data, 'num_substructures', 4),
         # Step 2 & 3: MoCo 参数
-        use_moco=getattr(config.model, 'use_moco', False),
-        moco_momentum=getattr(config.model, 'moco_momentum', 0.999),
-        queue_size=getattr(config.model, 'queue_size', 8192),
+        use_moco=_cfg('use_moco', False),
+        moco_momentum=_cfg('moco_momentum', 0.999),
+        queue_size=_cfg('queue_size', 8192),
     )
 

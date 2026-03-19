@@ -652,171 +652,6 @@ class CNNMambaEncoder(nn.Module):
         return intermediates[-2]
 
 
-# ============== CNN + Transformer 编码器 (替代方案) ==============
-
-class PositionalEncoding(nn.Module):
-    """Transformer 的正弦位置编码。"""
-    
-    def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
-        self.register_buffer('pe', pe)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        参数:
-            x: 输入张量 [B, L, D]
-        """
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
-
-
-# Import math for PositionalEncoding
-import math
-
-
-class CNNTransformerEncoder(nn.Module):
-    """
-    CNN + Transformer 编码器作为 CNN + Mamba 的替代方案。
-    
-    用于比较 Mamba 与 Transformer 的消融研究。
-    注意：Transformer 具有 O(n^2) 的复杂度，而 Mamba 为 O(n)。
-    """
-    
-    def __init__(
-        self,
-        in_channels: int = 1,
-        cnn_channels: List[int] = [32, 64, 128, 256],
-        cnn_kernel_sizes: List[int] = [7, 5, 5, 3],
-        cnn_strides: List[int] = [2, 2, 2, 2],
-        cnn_dropout: float = 0.1,
-        transformer_d_model: int = 256,
-        transformer_n_heads: int = 8,
-        transformer_n_layers: int = 4,
-        transformer_dim_ff: int = 1024,
-        transformer_dropout: float = 0.1,
-        pool_type: str = "mean"
-    ):
-        """
-        参数:
-            in_channels: 输入通道数
-            cnn_channels: CNN 通道大小
-            cnn_kernel_sizes: CNN 卷积核大小
-            cnn_strides: CNN 步幅
-            cnn_dropout: CNN dropout
-            transformer_d_model: Transformer 模型维度
-            transformer_n_heads: 注意力头数量
-            transformer_n_layers: Transformer 层数
-            transformer_dim_ff: 前馈层维度
-            transformer_dropout: Transformer dropout
-            pool_type: 池化类型
-        """
-        super().__init__()
-        
-        self.pool_type = pool_type
-        
-        # CNN backbone
-        self.cnn = CNNBackbone(
-            in_channels=in_channels,
-            channels=cnn_channels,
-            kernel_sizes=cnn_kernel_sizes,
-            strides=cnn_strides,
-            dropout=cnn_dropout
-        )
-        
-        # Projection
-        cnn_out_dim = cnn_channels[-1]
-        if cnn_out_dim != transformer_d_model:
-            self.proj = nn.Linear(cnn_out_dim, transformer_d_model)
-        else:
-            self.proj = nn.Identity()
-        
-        # Positional encoding
-        self.pos_encoder = PositionalEncoding(
-            transformer_d_model, dropout=transformer_dropout
-        )
-        
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=transformer_d_model,
-            nhead=transformer_n_heads,
-            dim_feedforward=transformer_dim_ff,
-            dropout=transformer_dropout,
-            activation='gelu',
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=transformer_n_layers
-        )
-        
-        self.out_dim = transformer_d_model
-        
-        if pool_type == "cls":
-            self.cls_token = nn.Parameter(torch.randn(1, 1, transformer_d_model))
-    
-    def forward(
-        self,
-        x: torch.Tensor,
-        return_sequence: bool = False
-    ) -> torch.Tensor:
-        """
-        前向传播。
-        
-        参数:
-            x: 输入 [B, 1, L] 或 [B, L]
-            return_sequence: 返回完整序列或池化结果
-            
-        返回:
-            输出张量
-        """
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        
-        batch_size = x.shape[0]
-        
-        # CNN
-        cnn_out = self.cnn(x)
-        cnn_out = cnn_out.transpose(1, 2)  # [B, L', C]
-        cnn_out = self.proj(cnn_out)
-        
-        # Add CLS token
-        if self.pool_type == "cls":
-            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-            cnn_out = torch.cat([cls_tokens, cnn_out], dim=1)
-        
-        # Positional encoding
-        cnn_out = self.pos_encoder(cnn_out)
-        
-        # Transformer
-        output = self.transformer(cnn_out)
-        
-        # Pooling
-        if self.pool_type == "cls":
-            pooled = output[:, 0]
-        elif self.pool_type == "mean":
-            if self.pool_type == "cls":
-                pooled = output[:, 1:].mean(dim=1)
-            else:
-                pooled = output.mean(dim=1)
-        elif self.pool_type == "max":
-            pooled = output.max(dim=1)[0]
-        
-        if return_sequence:
-            return output
-        
-        return pooled
-
-
 # ============== SincNet 前端 ==============
 
 class SincConv1d(nn.Module):
@@ -837,11 +672,12 @@ class SincConv1d(nn.Module):
         in_channels: int = 1,
         out_channels: int = 64,
         kernel_size: int = 251,
-        stride: int = 2,
+        stride: int = 1,
         padding: str = 'same',
         sample_rate: int = 5000,
-        min_low_hz: float = 25.0,
-        min_band_hz: float = 25.0
+        min_low_hz: float = 20.0,
+        min_band_hz: float = 20.0,
+        max_high_hz: float = 500.0,
     ):
         """
         参数:
@@ -863,6 +699,7 @@ class SincConv1d(nn.Module):
         self.sample_rate = sample_rate
         self.min_low_hz = min_low_hz
         self.min_band_hz = min_band_hz
+        self.max_high_hz = min(max_high_hz, sample_rate / 2)
         
         # 计算填充
         if padding == 'same':
@@ -874,9 +711,9 @@ class SincConv1d(nn.Module):
         assert kernel_size % 2 == 1, "kernel_size must be odd"
         
         # 初始化可学习的截止频率
-        # 使用 Mel-scale 分布初始化，覆盖心音关键频段 (25-400Hz)
-        low_hz = 25.0
-        high_hz = min(400.0, sample_rate / 2)
+        # 使用 Mel-scale 分布初始化，覆盖心音关键频段 (20-500Hz)
+        low_hz = max(20.0, min_low_hz)
+        high_hz = min(self.max_high_hz, sample_rate / 2)
         
         # Mel-scale 初始化
         mel_low = self._hz_to_mel(low_hz)
@@ -919,10 +756,11 @@ class SincConv1d(nn.Module):
         """
         # 确保频率在有效范围内
         low_hz = self.min_low_hz + torch.abs(self.low_hz_)
+        low_hz = torch.clamp(low_hz, min=self.min_low_hz, max=self.max_high_hz - self.min_band_hz)
         high_hz = torch.clamp(
             low_hz + self.min_band_hz + torch.abs(self.band_hz_),
             min=self.min_low_hz,
-            max=self.sample_rate / 2
+            max=self.max_high_hz
         )
         band = (high_hz - low_hz)[:, 0]
         
@@ -1095,20 +933,93 @@ class DepthwiseSeparableConv1d(nn.Module):
         return x
 
 
+class ConvNeXt1DBlock(nn.Module):
+    """
+    ConvNeXt 风格的一维卷积块。
+
+    结构: DWConv(k=7) -> Norm -> PW(扩张) -> GELU -> PW(回投) -> DropPath + Residual
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int = 7,
+        expansion: int = 4,
+        drop_path: float = 0.0,
+        use_groupnorm: bool = True,
+        num_groups: int = 8,
+    ):
+        super().__init__()
+
+        padding = kernel_size // 2
+        self.dwconv = nn.Conv1d(
+            dim,
+            dim,
+            kernel_size=kernel_size,
+            padding=padding,
+            groups=dim,
+            bias=False,
+        )
+
+        if use_groupnorm:
+            self.norm = nn.GroupNorm(num_groups, dim)
+        else:
+            self.norm = nn.BatchNorm1d(dim)
+
+        self.pwconv1 = nn.Conv1d(dim, dim * expansion, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv1d(dim * expansion, dim, kernel_size=1)
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        x = self.drop_path(x)
+        return x + residual
+
+
+class DynamicSubstructureMasking(nn.Module):
+    """
+    动态掩码局部头。
+
+    从时序特征中学习 K 组时间权重，聚合得到 K 个子结构表征。
+    """
+
+    def __init__(self, d_model: int, num_substructures: int = 4):
+        super().__init__()
+        self.num_substructures = num_substructures
+        self.score = nn.Linear(d_model, num_substructures)
+
+    def forward(self, sequence: torch.Tensor) -> torch.Tensor:
+        """
+        参数:
+            sequence: [B, T, D]
+
+        返回:
+            子结构 token: [B, K, D]
+        """
+        logits = self.score(sequence)             # [B, T, K]
+        weights = F.softmax(logits.transpose(1, 2), dim=-1)  # [B, K, T]
+        tokens = torch.bmm(weights, sequence)     # [B, K, D]
+        return tokens
+
+
 # ============== SincNet + ECA + ASP + Mamba 编码器 ==============
 
 class SincNetECAMambaEncoder(nn.Module):
     """
-    优化的心音编码器：SincNet + ECA + ASP + 轻量 Mamba。
-    
-    架构设计针对心音信号的特点：
-    - Stage 0: SincNet 前端学习频带特征
-    - Stage 1-2: 轻量卷积 + ECA 注意力提取局部模式
-    - Stage 3: Token 投影准备序列建模
-    - Stage 4: 轻量 Mamba 建模长程依赖
-    - Stage 5: ASP 池化提取周期级特征 + 子结构切分
-    
-    接口保持与 CNNMambaEncoder 一致，可直接替换。
+    SinCNeXt-BM 编码器（覆盖原 sincnet_eca_mamba）。
+
+    结构:
+    - Prior Stem: 限频 SincNet + MaxPool(k=4)
+    - Local Stage: 2 x ConvNeXt1D + MaxPool(k=2)
+    - Global Stage: 6 x Bi-Mamba (d_model=128)
+    - Local Head: Dynamic Masking 提取 K 个子结构 token
+    - Global Head: 末端 ASP 生成周期级表征
     """
     
     def __init__(
@@ -1116,21 +1027,27 @@ class SincNetECAMambaEncoder(nn.Module):
         in_channels: int = 1,
         sinc_out_channels: int = 64,
         sinc_kernel_size: int = 251,
-        sinc_stride: int = 2,
-        stage1_channels: List[int] = [64, 96],
-        stage2_channels: List[int] = [96, 128],
+        sinc_stride: int = 1,
+        sinc_min_low_hz: float = 20.0,
+        sinc_min_band_hz: float = 20.0,
+        sinc_max_high_hz: float = 500.0,
+        local_dim: int = 128,
+        convnext_kernel_size: int = 7,
+        convnext_expansion: int = 4,
         mamba_d_model: int = 128,
-        mamba_n_layers: int = 2,
+        mamba_n_layers: int = 6,
         mamba_d_state: int = 16,
         mamba_d_conv: int = 4,
         mamba_expand: int = 2,
         mamba_dropout: float = 0.1,
         use_groupnorm: bool = True,
         num_groups: int = 8,
-        eca_kernel_size: int = 3,
-        cycle_output_dim: int = 192,
+        drop_path_rate: float = 0.1,
+        cycle_output_dim: int = 256,
         num_substructures: int = 4,
         pool_type: str = "asp",
+        use_bidirectional: bool = True,
+        bidirectional_fusion: str = "add",
         sample_rate: int = 5000,
         **kwargs  # 兼容旧参数
     ):
@@ -1164,82 +1081,58 @@ class SincNetECAMambaEncoder(nn.Module):
         self.num_substructures = num_substructures
         self.pool_type = pool_type
         self.out_dim = cycle_output_dim  # 接口兼容性
+        self.sub_feature_dim = mamba_d_model
         
-        # ============== Stage 0: SincNet 前端 ==============
+        # ============== Prior Stem: 限频 SincNet ==============
         self.sinc_conv = SincConv1d(
             in_channels=in_channels,
             out_channels=sinc_out_channels,
             kernel_size=sinc_kernel_size,
             stride=sinc_stride,
             padding='same',
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            min_low_hz=sinc_min_low_hz,
+            min_band_hz=sinc_min_band_hz,
+            max_high_hz=sinc_max_high_hz,
         )
         
-        # Normalization + Activation + AvgPool
+        # Normalization + Activation + MaxPool(k=4)
         if use_groupnorm:
             self.sinc_norm = nn.GroupNorm(num_groups, sinc_out_channels)
         else:
             self.sinc_norm = nn.BatchNorm1d(sinc_out_channels)
         
         self.sinc_act = nn.SiLU()
-        self.sinc_pool = nn.AvgPool1d(kernel_size=2, stride=2)
-        
-        # ============== Stage 1: Local CNN + ECA ==============
-        # Block 1: 64 -> 96
-        self.stage1_block1 = DepthwiseSeparableConv1d(
-            in_channels=stage1_channels[0],
-            out_channels=stage1_channels[1],
-            kernel_size=7,
-            stride=1,
-            padding=3,
-            use_groupnorm=use_groupnorm,
-            num_groups=num_groups
+        self.stem_pool = nn.MaxPool1d(kernel_size=4, stride=4)
+
+        # ============== Local Stage: ConvNeXt1D ==============
+        self.local_proj = nn.Conv1d(sinc_out_channels, local_dim, kernel_size=1)
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, 2)]
+        self.local_blocks = nn.Sequential(
+            ConvNeXt1DBlock(
+                dim=local_dim,
+                kernel_size=convnext_kernel_size,
+                expansion=convnext_expansion,
+                drop_path=dpr[0],
+                use_groupnorm=use_groupnorm,
+                num_groups=num_groups,
+            ),
+            ConvNeXt1DBlock(
+                dim=local_dim,
+                kernel_size=convnext_kernel_size,
+                expansion=convnext_expansion,
+                drop_path=dpr[1],
+                use_groupnorm=use_groupnorm,
+                num_groups=num_groups,
+            ),
         )
-        self.stage1_eca1 = ECABlock(stage1_channels[1], kernel_size=eca_kernel_size)
-        
-        # Block 2: 96 -> 96 (with downsampling)
-        self.stage1_block2 = DepthwiseSeparableConv1d(
-            in_channels=stage1_channels[1],
-            out_channels=stage1_channels[1],
-            kernel_size=5,
-            stride=2,
-            padding=2,
-            use_groupnorm=use_groupnorm,
-            num_groups=num_groups
-        )
-        self.stage1_eca2 = ECABlock(stage1_channels[1], kernel_size=eca_kernel_size)
-        
-        # ============== Stage 2: Multi-scale refinement ==============
-        # Block 3: 96 -> 128 (dilation=1)
-        self.stage2_block1 = DepthwiseSeparableConv1d(
-            in_channels=stage2_channels[0],
-            out_channels=stage2_channels[1],
-            kernel_size=5,
-            stride=1,
-            padding=2,
-            dilation=1,
-            use_groupnorm=use_groupnorm,
-            num_groups=num_groups
-        )
-        self.stage2_eca1 = ECABlock(stage2_channels[1], kernel_size=eca_kernel_size)
-        
-        # Block 4: 128 -> 128 (dilation=2)
-        self.stage2_block2 = DepthwiseSeparableConv1d(
-            in_channels=stage2_channels[1],
-            out_channels=stage2_channels[1],
-            kernel_size=5,
-            stride=1,
-            padding=4,
-            dilation=2,
-            use_groupnorm=use_groupnorm,
-            num_groups=num_groups
-        )
-        self.stage2_eca2 = ECABlock(stage2_channels[1], kernel_size=eca_kernel_size)
-        
-        # ============== Stage 3: Token projection ==============
-        self.token_proj = nn.Conv1d(stage2_channels[1], mamba_d_model, kernel_size=1)
-        
-        # ============== Stage 4: Lightweight Mamba ==============
+        self.local_downsample = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        # ============== Global Stage: Bi-Mamba ==============
+        self.token_proj = nn.Identity()
+        if local_dim != mamba_d_model:
+            self.token_proj = nn.Conv1d(local_dim, mamba_d_model, kernel_size=1)
+
         self.mamba = get_mamba_encoder_v2(
             d_model=mamba_d_model,
             n_layers=mamba_n_layers,
@@ -1247,23 +1140,29 @@ class SincNetECAMambaEncoder(nn.Module):
             d_conv=mamba_d_conv,
             expand=mamba_expand,
             dropout=mamba_dropout,
-            bidirectional=False,  # 单向即可，减少计算量
+            bidirectional=use_bidirectional,
+            fusion=bidirectional_fusion,
             use_official=False
         )
         
-        # ============== Stage 5: Pooling heads ==============
-        # 周期级头：ASP -> Linear
+        # ============== Heads ==============
+        self.local_head = DynamicSubstructureMasking(
+            d_model=mamba_d_model,
+            num_substructures=num_substructures,
+        )
+
+        # Global head: 末端 ASP，仅用于 z_cycle
         if pool_type == "asp":
             self.asp = AttentiveStatisticsPooling(mamba_d_model)
-            asp_out_dim = 2 * mamba_d_model  # ASP 输出均值+方差
+            pooled_dim = 2 * mamba_d_model
         else:
             self.asp = None
-            asp_out_dim = mamba_d_model
-        
-        self.cycle_head = nn.Linear(asp_out_dim, cycle_output_dim)
-        
-        # 子结构级头：共享 Linear
-        self.sub_head = nn.Linear(mamba_d_model, mamba_d_model)
+            pooled_dim = mamba_d_model
+
+        if pooled_dim != cycle_output_dim:
+            self.cycle_head = nn.Linear(pooled_dim, cycle_output_dim)
+        else:
+            self.cycle_head = nn.Identity()
     
     def forward(
         self,
@@ -1284,53 +1183,45 @@ class SincNetECAMambaEncoder(nn.Module):
             - return_sequence=True: Mamba 输出序列 [B, T, mamba_d_model]
             - return_intermediate=True: 包含 cycle_features 和 sub_features 的字典
         """
-        B = x.shape[0]
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
         
-        # Stage 0: SincNet 前端
-        x = self.sinc_conv(x)        # [B, 64, L/2]
+        # Prior stem
+        x = self.sinc_conv(x)        # [B, 64, L]
         x = self.sinc_norm(x)
         x = self.sinc_act(x)
-        x = self.sinc_pool(x)        # [B, 64, L/4]
-        
-        # Stage 1: Local CNN + ECA
-        x = self.stage1_block1(x)    # [B, 96, L/4]
-        x = self.stage1_eca1(x)
-        x = self.stage1_block2(x)    # [B, 96, L/8]
-        x = self.stage1_eca2(x)
-        
-        # Stage 2: Multi-scale refinement
-        x = self.stage2_block1(x)    # [B, 128, L/8]
-        x = self.stage2_eca1(x)
-        x = self.stage2_block2(x)    # [B, 128, L/8]
-        x = self.stage2_eca2(x)
-        
-        # 保存用于子结构对比学习的特征
-        sub_features = x  # [B, 128, T']
-        
-        # Stage 3: Token projection
-        x = self.token_proj(x)       # [B, 128, T']
-        x = x.transpose(1, 2)        # [B, T', 128]
-        
-        # Stage 4: Mamba
-        x = self.mamba(x)            # [B, T, 128]
+        x = self.stem_pool(x)        # [B, 64, L/4]
+
+        # Local stage
+        x = self.local_proj(x)       # [B, local_dim, L/4]
+        x = self.local_blocks(x)     # [B, local_dim, L/4]
+        x = self.local_downsample(x) # [B, local_dim, L/8]
+
+        # 兼容既有 L_sub 分支，保持 [B, C, T] 形态输出
+        sub_features = x
+
+        # Global stage
+        x = self.token_proj(x)       # [B, D, T]
+        x = x.transpose(1, 2)        # [B, T, D]
+        x = self.mamba(x)            # [B, T, D]
         sequence = x
         
         if return_sequence:
             return sequence
         
-        # Stage 5: Pooling
-        # 周期级特征
+        # Global head
         if self.pool_type == "asp" and self.asp is not None:
-            cycle_pooled = self.asp(x)  # [B, 256]
+            cycle_pooled = self.asp(x)
         else:
-            cycle_pooled = x.mean(dim=1)  # [B, 128]
+            cycle_pooled = x.mean(dim=1)
         
-        cycle_features = self.cycle_head(cycle_pooled)  # [B, 192]
+        cycle_features = self.cycle_head(cycle_pooled)
         
         if return_intermediate:
+            local_tokens = self.local_head(sequence).unsqueeze(-1)  # [B, K, D, 1]
             return {
                 "cycle_features": cycle_features,
-                "sub_features": sub_features,
+                "sub_features": local_tokens,
                 "sequence": sequence
             }
         
@@ -1346,25 +1237,301 @@ class SincNetECAMambaEncoder(nn.Module):
         返回:
             子结构特征 [B, 128, T']（Stage 2 输出）
         """
-        # Stage 0
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+
+        # Prior stem
         x = self.sinc_conv(x)
         x = self.sinc_norm(x)
         x = self.sinc_act(x)
-        x = self.sinc_pool(x)
+        x = self.stem_pool(x)
+
+        # Local stage
+        x = self.local_proj(x)
+        x = self.local_blocks(x)
+        x = self.local_downsample(x)
+
+        return x
+
+
+# ============== 1D-ResNet34 编码器（监督学习基线） ==============
+
+class BasicBlock1D(nn.Module):
+    """
+    1D ResNet 基础块。
+    
+    结构: Conv -> BN -> ReLU -> Conv -> BN -> (shortcut) -> ReLU
+    """
+    
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+    ):
+        """
+        参数:
+            in_channels: 输入通道数
+            out_channels: 输出通道数
+            kernel_size: 卷积核大小
+            stride: 步幅
+            downsample: 可选的下采样模块（用于改变通道数或空间维度）
+        """
+        super().__init__()
         
-        # Stage 1
-        x = self.stage1_block1(x)
-        x = self.stage1_eca1(x)
-        x = self.stage1_block2(x)
-        x = self.stage1_eca2(x)
+        padding = kernel_size // 2
         
-        # Stage 2
-        x = self.stage2_block1(x)
-        x = self.stage2_eca1(x)
-        x = self.stage2_block2(x)
-        x = self.stage2_eca2(x)
+        self.conv1 = nn.Conv1d(
+            in_channels, out_channels,
+            kernel_size=kernel_size, stride=stride,
+            padding=padding, bias=False
+        )
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
         
-        return x  # [B, 128, T']
+        self.conv2 = nn.Conv1d(
+            out_channels, out_channels,
+            kernel_size=kernel_size, stride=1,
+            padding=padding, bias=False
+        )
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        
+        self.downsample = downsample
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        参数:
+            x: 输入张量 [B, C_in, L]
+            
+        返回:
+            输出张量 [B, C_out, L']
+        """
+        identity = x
+        
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        
+        out = out + identity
+        out = self.relu(out)
+        
+        return out
+
+
+class ResNet1D34Encoder(nn.Module):
+    """
+    1D ResNet-34 编码器，简洁的基线结构。
+    
+    设计特点：
+    - 输入：单通道心音信号 [B, 1, L]
+    - Stem: Conv1D(k=15,s=2,p=7,c=64) + BN + ReLU + MaxPool(k=3,s=2,p=1)
+    - Layer1: 3×BasicBlock (c=64, k=7, s=1)
+    - Layer2: 4×BasicBlock (c=128, k=5, s=2）
+    - Layer3: 6×BasicBlock (c=256, k=3, s=2)
+    - Layer4: 3×BasicBlock (c=512, k=3, s=2)
+    - 头部: Global Average Pooling → 512维特征
+    - 输出维度: 512（out_dim=512）
+    
+    命名依据：
+    - ResNet-34 是经典的监督学习基线（参考 SimCLR 等工作）
+    - 1D 表示用于一维心音信号处理
+    """
+    
+    def __init__(
+        self,
+        in_channels: int = 1,
+        dropout: float = 0.0,
+    ):
+        """
+        参数:
+            in_channels: 输入通道数（PCG 通常为 1）
+            dropout: Dropout 率（当前未使用，预留接口）
+        """
+        super().__init__()
+        
+        self.in_channels = in_channels
+        self.out_dim = 512
+        
+        # ============== Stem ==============
+        self.conv1 = nn.Conv1d(
+            in_channels, 64,
+            kernel_size=15, stride=2, padding=7, bias=False
+        )
+        self.bn1 = nn.BatchNorm1d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        
+        # ============== Residual Layers ==============
+        # Layer1: 3×BasicBlock, c=64, k=7, s=1
+        self.layer1 = self._make_layer(64, 64, 3, kernel_size=7, stride=1)
+        
+        # Layer2: 4×BasicBlock, c=128, k=5, s=2 (首块stride=2)
+        self.layer2 = self._make_layer(64, 128, 4, kernel_size=5, stride=2)
+        
+        # Layer3: 6×BasicBlock, c=256, k=3, s=2 (首块stride=2)
+        self.layer3 = self._make_layer(128, 256, 6, kernel_size=3, stride=2)
+        
+        # Layer4: 3×BasicBlock, c=512, k=3, s=2 (首块stride=2)
+        self.layer4 = self._make_layer(256, 512, 3, kernel_size=3, stride=2)
+        
+        # ============== 头部 ==============
+        # Global Average Pooling (在 forward 中实现)
+        # 输出维度: 512
+        
+        # 初始化权重
+        self._init_weights()
+        
+        # 用于子结构特征提取的中间输出（Layer3 后的张量）
+        self.layer3_output = None
+    
+    def _make_layer(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_blocks: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+    ) -> nn.Sequential:
+        """
+        构建残差层。
+        
+        参数:
+            in_channels: 输入通道数
+            out_channels: 输出通道数
+            num_blocks: 块数量
+            kernel_size: 卷积核大小
+            stride: 首块的步幅
+            
+        返回:
+            nn.Sequential 包含所有 BasicBlock
+        """
+        layers = []
+        
+        # 首块：可能需要下采样（改变通道数或步幅）
+        if stride != 1 or in_channels != out_channels:
+            downsample = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+        else:
+            downsample = None
+        
+        layers.append(BasicBlock1D(
+            in_channels, out_channels,
+            kernel_size=kernel_size, stride=stride,
+            downsample=downsample
+        ))
+        
+        # 其余块：无下采样，stride=1
+        for _ in range(1, num_blocks):
+            layers.append(BasicBlock1D(
+                out_channels, out_channels,
+                kernel_size=kernel_size, stride=1,
+                downsample=None
+            ))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self):
+        """初始化权重（He initialization）。"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_sequence: bool = False,
+        return_intermediate: bool = False,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        前向传播。
+        
+        参数:
+            x: 输入信号 [B, 1, L] 或 [B, L]
+            return_sequence: 是否返回序列（当前 ResNet 不支持，返回 pooled）
+            return_intermediate: 是否返回中间特征（Layer3 输出）
+            
+        返回:
+            如果 return_intermediate:
+                {"cycle_features": [B, 512], "sub_features": [B, 256, L']}
+            否则:
+                [B, 512] 池化后的特征
+        """
+        # 处理输入维度
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # [B, L] -> [B, 1, L]
+        
+        # Stem
+        x = self.conv1(x)      # [B, 64, L/2]
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)    # [B, 64, L/4]
+        
+        # Layer1: c=64, L/4
+        x = self.layer1(x)     # [B, 64, L/4]
+        
+        # Layer2: c=128, L/8
+        x = self.layer2(x)     # [B, 128, L/8]
+        
+        # Layer3: c=256, L/16
+        x = self.layer3(x)     # [B, 256, L/16]
+        sub_features = x       # 保存中间特征
+        
+        # Layer4: c=512, L/32
+        x = self.layer4(x)     # [B, 512, L/32]
+        
+        # Global Average Pooling
+        pooled = x.mean(dim=2)  # [B, 512]
+        
+        if return_intermediate:
+            return {
+                "cycle_features": pooled,
+                "sub_features": sub_features,  # [B, 256, L/16]
+                "sequence": x
+            }
+        
+        return pooled
+    
+    def get_sub_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        提取子结构级特征（Layer3 输出）。
+        
+        为后续扩展支持子结构级对比学习预留接口。
+        
+        参数:
+            x: 输入信号 [B, 1, L] 或 [B, L]
+            
+        返回:
+            子结构特征 [B, 256, L/16]
+        """
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        
+        # Stem
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        
+        # Layers
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        
+        # 返回 Layer3 输出
+        return x
 
 
 # ============== 工厂函数 ==============
@@ -1377,19 +1544,22 @@ def build_encoder(
     基于类型构建编码器的工厂函数。
     
     参数:
-        encoder_type: "cnn_only", "cnn_mamba", "cnn_transformer", "sincnet_eca_mamba" 之一
+        encoder_type: "cnn_mamba", "sincnet_eca_mamba", "resnet34_1d" 之一
         **kwargs: 传递给编码器构造函数的其他参数
         
     返回:
         编码器模块
+        
+    支持的编码器类型:
+        - "cnn_mamba": CNN-Mamba 混合（预训练和监督学习）
+        - "sincnet_eca_mamba": SinCNeXt-BM（预训练和监督学习）
+        - "resnet34_1d": 1D ResNet-34（仅限监督学习基线）
     """
-    if encoder_type == "cnn_only":
-        return CNNBackbone(**kwargs)
-    elif encoder_type == "cnn_mamba":
+    if encoder_type == "cnn_mamba":
         return CNNMambaEncoder(**kwargs)
-    elif encoder_type == "cnn_transformer":
-        return CNNTransformerEncoder(**kwargs)
     elif encoder_type == "sincnet_eca_mamba":
         return SincNetECAMambaEncoder(**kwargs)
+    elif encoder_type == "resnet34_1d":
+        return ResNet1D34Encoder(**kwargs)
     else:
         raise ValueError(f"Unknown encoder type: {encoder_type}")

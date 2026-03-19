@@ -6,11 +6,8 @@
 #   # 测试 CNN-Mamba 编码器
 #   python scripts/train_supervised_baseline.py --task physionet2016
 #   
-#   # 测试 CNN-only 编码器
-#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_only
-#   
-#   # 测试 CNN-Transformer 编码器
-#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_transformer
+#   # 测试 SinCNeXt-BM 编码器（沿用类型名 sincnet_eca_mamba）
+#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type sincnet_eca_mamba
 
 experiment:
   name: "supervised_baseline"
@@ -29,10 +26,10 @@ data:
 
 # 模型架构配置
 model:
-  # 编码器类型: cnn_only, cnn_transformer, cnn_mamba, sincnet_eca_mamba
+  # 编码器类型: cnn_mamba, sincnet_eca_mamba, resnet34_1d
   encoder_type: "cnn_mamba"
   
-  # CNN 配置 (用于 cnn_only, cnn_transformer, cnn_mamba)
+  # CNN 配置 (用于 cnn_mamba)
   cnn_channels: [32, 64, 128, 256]
   cnn_kernel_sizes: [7, 5, 5, 3]
   cnn_strides: [2, 2, 2, 2]
@@ -44,15 +41,9 @@ model:
   mamba_d_conv: 4
   mamba_expand_factor: 2
   
-  # Transformer 配置 (当 encoder_type="cnn_transformer" 时使用)
-  transformer_n_layers: 4
-  transformer_n_heads: 8
-  transformer_d_ff: 1024
-  transformer_dropout: 0.1
-  
-  # ============== SincNet+ECA+Mamba 配置 (推荐，轻量高效) ==============
+  # ============== SinCNeXt-BM 配置 (替代原 SincNet+ECA+Mamba) ==============
   # 启用方式: 将 encoder_type 设为 "sincnet_eca_mamba"
-  # 优势: 参数量减少 83%，训练更快，更适合心音信号
+  # 结构: 限频 SincNet -> ConvNeXt Local -> 6层 Bi-Mamba -> Dynamic Mask + ASP
   #
   # 快速开始:
   #   python scripts/train_supervised_baseline.py \
@@ -62,15 +53,18 @@ model:
   # 配置参数:
   sinc_out_channels: 64        # SincNet 输出通道数
   sinc_kernel_size: 251        # SincNet 卷积核大小
-  sinc_stride: 2               # SincNet 步幅
-  stage1_channels: [64, 96]    # Stage 1 通道配置
-  stage2_channels: [96, 128]   # Stage 2 通道配置
-  # mamba_d_model: 128         # 覆盖上面的配置
-  # mamba_n_layers: 2          # 覆盖上面的配置
+  sinc_stride: 1               # SincNet 步幅 (SinCNeXt-BM 默认不下采样)
+  sinc_min_low_hz: 20.0        # 频带下限 (Hz)
+  sinc_min_band_hz: 20.0       # 最小带宽 (Hz)
+  sinc_max_high_hz: 500.0      # 频带上限 (Hz)
+  local_dim: 128               # ConvNeXt / Mamba 主维度
+  convnext_kernel_size: 7      # ConvNeXt 深度卷积核
+  convnext_expansion: 4        # ConvNeXt 通道扩张倍数
+  # mamba_d_model: 128         # 建议设为 128（与 local_dim 一致）
+  # mamba_n_layers: 6          # 建议设为 6（Bi-Mamba 深度）
   use_groupnorm: true          # 使用 GroupNorm (推荐)
   num_groups: 8                # GroupNorm 分组数
-  eca_kernel_size: 3           # ECA 注意力卷积核
-  cycle_output_dim: 192        # 周期级输出维度
+  cycle_output_dim: 256        # 周期级输出维度（ASP 输出）
   pool_type: "asp"             # 池化类型: asp 或 mean
   
   # ============== 新增：正则化和注意力 ==============
@@ -85,9 +79,8 @@ model:
   # 推荐值: 0.1 ~ 0.3
   drop_path_rate: 0.1
   
-  # 双向 Mamba (可选，训练时间约增加 50%)
-  # 仅在最终验证时启用，日常实验使用单向 Mamba
-  use_bidirectional: false
+  # 双向 Mamba (SinCNeXt-BM 推荐开启)
+  use_bidirectional: true
   bidirectional_fusion: "add"  # "add", "concat", "gate"
   
   # ============== 多尺度并行卷积 ==============
@@ -98,6 +91,33 @@ model:
   # 注意：启用后会增加约 30% 的参数量
   use_multiscale: false
   multiscale_kernel_sizes: [3, 7, 15]
+
+  # ============== 1D-ResNet34 配置（仅监督学习基线使用） ==============
+  # 简洁的 ResNet 基线：无 mamba/transformer，纯残差卷积网络
+  # 命名：resnet34_1d（表示 1D ResNet-34）
+  # 
+  # 快速开始:
+  #   python scripts/train_supervised_baseline.py \
+  #     --task physionet2016 \
+  #     --encoder-type resnet34_1d
+  #
+  # 网络结构（固定，无超参数）:
+  #   Stem: Conv1D(k=15, s=2, p=7, c=64) + BN + ReLU + MaxPool(k=3, s=2, p=1)
+  #   Layer1: 3×BasicBlock (c=64, k=7, s=1)
+  #   Layer2: 4×BasicBlock (c=128, k=5, s=2)
+  #   Layer3: 6×BasicBlock (c=256, k=3, s=2)
+  #   Layer4: 3×BasicBlock (c=512, k=3, s=2)
+  #   头部: Global Average Pooling → 512维特征
+  #
+  # 优点：
+  #   - 参数量小（仅约 21M，相比 SincNet+Mamba）
+  #   - 训练快速，显存占用低
+  #   - 作为监督学习基线验证编码器通用性
+  #
+  # 注意事项：
+  #   - 当前版本仅支持监督学习基线，不支持预训练或微调
+  #   - 如需预训练支持，需单独扩展
+  resnet34_1d_dropout: 0.0
 
 # 分类器设置
 classifier:

@@ -340,9 +340,8 @@ class AblationRunner:
         self.logger.info("=" * 60)
         
         encoder_variants = [
-            ("cnn_only", {"model.encoder_type": "cnn_only"}),
-            ("cnn_transformer", {"model.encoder_type": "cnn_transformer"}),
-            ("cnn_mamba", {"model.encoder_type": "cnn_mamba"}),  # 完整 PA-HCL
+            ("cnn_mamba", {"model.encoder_type": "cnn_mamba"}),
+            ("sincnet_eca_mamba", {"model.encoder_type": "sincnet_eca_mamba"}),
         ]
         
         for name, overrides in encoder_variants:

@@ -29,10 +29,10 @@ class TestAblationRunner:
         config = MockConfig()
         
         # Simulate override
-        config.model.encoder_type = "cnn_transformer"
+        config.model.encoder_type = "cnn_mamba"
         config.loss.temperature = 0.1
         
-        assert config.model.encoder_type == "cnn_transformer"
+        assert config.model.encoder_type == "cnn_mamba"
         assert config.loss.temperature == 0.1
         print("✓ Simple config override works")
     
@@ -62,13 +62,12 @@ class TestAblationVariants:
     def test_encoder_variants(self):
         """测试编码器变体定义。"""
         encoder_variants = [
-            ("cnn_only", "cnn_only"),
-            ("cnn_transformer", "cnn_transformer"),
             ("cnn_mamba", "cnn_mamba"),
+            ("sincnet_eca_mamba", "sincnet_eca_mamba"),
         ]
         
         for name, encoder_type in encoder_variants:
-            assert encoder_type in ["cnn_only", "cnn_transformer", "cnn_mamba"]
+            assert encoder_type in ["cnn_mamba", "sincnet_eca_mamba"]
         
         print("✓ Encoder variants are valid")
     
@@ -138,16 +137,15 @@ class TestAblationResults:
     def test_result_aggregation(self):
         """测试聚合多个结果。"""
         results = {
-            "encoder_cnn_only": {"downstream": {"test_f1": 0.75}},
-            "encoder_cnn_transformer": {"downstream": {"test_f1": 0.80}},
             "encoder_cnn_mamba": {"downstream": {"test_f1": 0.85}},
+            "encoder_sincnet_eca_mamba": {"downstream": {"test_f1": 0.87}},
         }
         
         f1_scores = [r["downstream"]["test_f1"] for r in results.values()]
         best_variant = max(results.keys(), key=lambda k: results[k]["downstream"]["test_f1"])
         
-        assert best_variant == "encoder_cnn_mamba"
-        assert max(f1_scores) == 0.85
+        assert best_variant == "encoder_sincnet_eca_mamba"
+        assert max(f1_scores) == 0.87
         
         print("✓ Result aggregation works")
 
@@ -158,13 +156,13 @@ class TestReportGeneration:
     def test_markdown_table_generation(self):
         """测试生成 markdown 表格。"""
         results = {
-            "encoder_cnn_only": {
-                "status": "completed",
-                "downstream": {"test_accuracy": 0.75, "test_f1": 0.73}
-            },
             "encoder_cnn_mamba": {
                 "status": "completed",
                 "downstream": {"test_accuracy": 0.85, "test_f1": 0.83}
+            },
+            "encoder_sincnet_eca_mamba": {
+                "status": "completed",
+                "downstream": {"test_accuracy": 0.87, "test_f1": 0.85}
             }
         }
         
@@ -182,8 +180,8 @@ class TestReportGeneration:
         
         table = "\n".join(lines)
         
-        assert "encoder_cnn_only" in table
         assert "encoder_cnn_mamba" in table
+        assert "encoder_sincnet_eca_mamba" in table
         assert "0.8500" in table
         
         print("✓ Markdown table generation works")
@@ -217,7 +215,7 @@ class TestIntegration:
         print("=" * 50)
         
         # Simulate encoder ablation
-        encoder_variants = ["cnn_only", "cnn_transformer", "cnn_mamba"]
+        encoder_variants = ["cnn_mamba", "sincnet_eca_mamba"]
         results = {}
         
         for variant in encoder_variants:

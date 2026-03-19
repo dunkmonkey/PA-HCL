@@ -16,7 +16,7 @@ data:
 
 # 基础模型设置 (PA-HCL 默认)
 model:
-  encoder_type: "cnn_mamba"  # 选项: cnn_only, cnn_transformer, cnn_mamba
+  encoder_type: "cnn_mamba"  # 选项: cnn_mamba, sincnet_eca_mamba
   
   # CNN 主干网络
   cnn_channels: [32, 64, 128, 256]
@@ -28,11 +28,6 @@ model:
   mamba_n_layers: 4
   mamba_d_state: 16
   mamba_expand: 2
-  
-  # Transformer 设置 (针对 cnn_transformer 变体)
-  transformer_n_heads: 8
-  transformer_n_layers: 4
-  transformer_ff_dim: 1024
   
   # 投影头
   projection_dim: 128
@@ -83,20 +78,15 @@ ablation:
   # 编码器架构消融
   encoder:
     variants:
-      - name: "cnn_only"
-        description: "仅 CNN 主干 (无序列建模)"
-        overrides:
-          model.encoder_type: "cnn_only"
-      
-      - name: "cnn_transformer"
-        description: "CNN + Transformer 用于序列建模"
-        overrides:
-          model.encoder_type: "cnn_transformer"
-      
       - name: "cnn_mamba"
         description: "CNN + Mamba (SSM) 用于序列建模 (PA-HCL 默认)"
         overrides:
           model.encoder_type: "cnn_mamba"
+      
+      - name: "sincnet_eca_mamba"
+        description: "SincNet + ECA + Mamba 轻量高效宏 (推荐)"
+        overrides:
+          model.encoder_type: "sincnet_eca_mamba"
   
   # 损失组件消融
   loss_components:

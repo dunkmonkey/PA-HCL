@@ -7,7 +7,7 @@ PA-HCL 监督学习基线训练脚本。
 
 特点:
     - 完全监督学习（不使用预训练）
-    - 支持多种编码器架构（CNN-only, CNN-Transformer, CNN-Mamba）
+    - 支持不同的编码器架构（CNN-Mamba, SincNet-ECA-Mamba）
     - 与预训练+微调结果对比，评估预训练的增益
 
 用法:
@@ -15,9 +15,8 @@ PA-HCL 监督学习基线训练脚本。
     python scripts/train_supervised_baseline.py --task physionet2016
     
     # 测试不同编码器架构
-    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_only
-    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_transformer
     python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_mamba
+    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type sincnet_eca_mamba
     
     # 使用自定义配置
     python scripts/train_supervised_baseline.py \\
@@ -38,6 +37,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 # 将项目根目录添加到路径
 project_root = Path(__file__).parent.parent
@@ -141,10 +141,8 @@ def parse_args():
     # 在 PhysioNet 2016 上训练 CNN-Mamba 基线
     python scripts/train_supervised_baseline.py --task physionet2016
     
-    # 对比不同架构
-    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_only
-    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_transformer
-    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type cnn_mamba
+    # 测试 SincNet-ECA-Mamba 编码器
+    python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type sincnet_eca_mamba
     
     # 启用 WandB 跟踪
     python scripts/train_supervised_baseline.py --task physionet2016 --wandb
@@ -172,7 +170,7 @@ def parse_args():
     model_group.add_argument(
         "--encoder-type",
         type=str,
-        choices=["cnn_only", "cnn_transformer", "cnn_mamba"],
+        choices=["cnn_mamba", "sincnet_eca_mamba", "resnet34_1d"],
         default=None,
         help="编码器类型（覆盖配置文件）"
     )
@@ -446,22 +444,12 @@ def create_model(config, num_classes, logger):
         logger.info(f"  多尺度卷积核: {multiscale_kernel_sizes}")
     
     # 准备编码器参数
-    encoder_kwargs = {
+    encoder_kwargs: Dict[str, Any] = {
         'in_channels': 1,
     }
     
     # 根据编码器类型添加特定参数
-    if config.model.encoder_type == "cnn_only":
-        encoder_kwargs.update({
-            'channels': config.model.cnn_channels,
-            'kernel_sizes': config.model.cnn_kernel_sizes,
-            'strides': config.model.cnn_strides,
-            'drop_path_rate': drop_path_rate,
-            'attention_type': attention_type,
-            'use_multiscale': use_multiscale,
-            'multiscale_kernel_sizes': multiscale_kernel_sizes,
-        })
-    elif config.model.encoder_type == "cnn_mamba":
+    if config.model.encoder_type == "cnn_mamba":
         encoder_kwargs.update({
             'cnn_channels': config.model.cnn_channels,
             'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
@@ -478,28 +466,52 @@ def create_model(config, num_classes, logger):
             'use_multiscale': use_multiscale,
             'multiscale_kernel_sizes': multiscale_kernel_sizes,
         })
-    elif config.model.encoder_type == "cnn_transformer":
+    elif config.model.encoder_type == "sincnet_eca_mamba":
         encoder_kwargs.update({
-            'cnn_channels': config.model.cnn_channels,
-            'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
-            'cnn_strides': config.model.cnn_strides,
-            'transformer_d_model': getattr(config.model, 'mamba_d_model', 256),  # 使用相同的维度
-            'transformer_n_layers': getattr(config.model, 'transformer_n_layers', 4),
-            'transformer_n_heads': getattr(config.model, 'transformer_n_heads', 8),
-            'transformer_d_ff': getattr(config.model, 'transformer_d_ff', 1024),
-            'transformer_dropout': getattr(config.model, 'transformer_dropout', 0.1),
+            'sinc_out_channels': getattr(config.model, 'sinc_out_channels', 64),
+            'sinc_kernel_size': getattr(config.model, 'sinc_kernel_size', 251),
+            'sinc_stride': getattr(config.model, 'sinc_stride', 1),
+            'sinc_min_low_hz': getattr(config.model, 'sinc_min_low_hz', 20.0),
+            'sinc_min_band_hz': getattr(config.model, 'sinc_min_band_hz', 20.0),
+            'sinc_max_high_hz': getattr(config.model, 'sinc_max_high_hz', 500.0),
+            'local_dim': getattr(config.model, 'local_dim', 128),
+            'convnext_kernel_size': getattr(config.model, 'convnext_kernel_size', 7),
+            'convnext_expansion': getattr(config.model, 'convnext_expansion', 4),
+            'mamba_d_model': getattr(config.model, 'mamba_d_model', 256),
+            'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 6),
+            'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
+            'mamba_d_conv': getattr(config.model, 'mamba_d_conv', 4),
+            'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
+            'mamba_dropout': getattr(config.model, 'mamba_dropout', 0.1),
+            'drop_path_rate': drop_path_rate,
+            'cycle_output_dim': getattr(config.model, 'cycle_output_dim', 256),
+            'num_substructures': getattr(config.data, 'num_substructures', 4),
+            'pool_type': getattr(config.model, 'pool_type', 'asp'),
+            'use_bidirectional': getattr(config.model, 'use_bidirectional', True),
+            'bidirectional_fusion': getattr(config.model, 'bidirectional_fusion', 'add'),
+            'sample_rate': getattr(config.data, 'sample_rate', 5000),
+            'use_groupnorm': getattr(config.model, 'use_groupnorm', True),
+            'num_groups': getattr(config.model, 'num_groups', 8),
         })
+    elif config.model.encoder_type == "resnet34_1d":
+        # 1D-ResNet34：简洁的基线，只需要输入通道
+        encoder_kwargs.update({
+            'in_channels': 1,
+            'dropout': getattr(config.model, 'dropout', 0.0),
+        })
+        logger.info("使用 ResNet1D34 作为编码器（仅用于监督学习基线）")
     
     encoder = build_encoder(
         encoder_type=config.model.encoder_type,
         **encoder_kwargs
     )
     
-    # 获取编码器输出维度
-    if config.model.encoder_type == "cnn_only":
-        encoder_dim = config.model.cnn_channels[-1]
-    else:
-        encoder_dim = config.model.mamba_d_model if hasattr(config.model, 'mamba_d_model') else 256
+    # 获取编码器输出维度（优先使用编码器自身声明）
+    encoder_dim = getattr(encoder, 'out_dim', getattr(encoder, 'cycle_output_dim', None))
+    if encoder_dim is None:
+        encoder_dim = getattr(config.model, 'cycle_output_dim', None)
+    if encoder_dim is None:
+        encoder_dim = getattr(config.model, 'mamba_d_model', 256)
     
     # 获取分类头参数
     classifier_hidden_dim = getattr(config.classifier, 'hidden_dim', 128)
@@ -623,21 +635,87 @@ def main():
     model = create_model(config, num_classes, logger)
     model = model.to(device)
     
+    # ============== 获取训练配置 ==============
+    # 从 config 中提取训练参数，保持与微调脚本一致
+    training_cfg = config.training if hasattr(config, 'training') else config.downstream if hasattr(config, 'downstream') else None
+    
+    if training_cfg is not None:
+        num_epochs = getattr(training_cfg, 'num_epochs', 50)
+        learning_rate = getattr(training_cfg, 'learning_rate', 1e-3)
+        weight_decay = getattr(training_cfg, 'weight_decay', 1e-4)
+        warmup_epochs = getattr(training_cfg, 'warmup_epochs', 10)
+        min_lr = getattr(training_cfg, 'min_lr', 1e-7)
+        label_smoothing = getattr(training_cfg, 'label_smoothing', 0.1)
+        use_class_weights = getattr(training_cfg, 'use_class_weights', True)
+        early_stopping_patience = getattr(training_cfg, 'early_stopping_patience', 20)
+        use_amp = getattr(training_cfg, 'use_amp', True)
+        log_interval = getattr(training_cfg, 'log_interval', 20)
+        save_interval = getattr(training_cfg, 'save_interval', 10)
+        grad_clip_norm = getattr(training_cfg, 'grad_clip_norm', 1.0)
+    else:
+        # 使用默认值（向后兼容）
+        num_epochs = 50
+        learning_rate = 1e-3
+        weight_decay = 1e-4
+        warmup_epochs = 10
+        min_lr = 1e-7
+        label_smoothing = 0.1
+        use_class_weights = True
+        early_stopping_patience = 20
+        use_amp = True
+        log_interval = 20
+        save_interval = 10
+        grad_clip_norm = 1.0
+    
+    # 获取评估配置
+    if hasattr(config, 'evaluation'):
+        primary_metric = getattr(config.evaluation, 'primary_metric', 'f1_macro')
+    else:
+        primary_metric = 'f1_macro' if num_classes > 2 else 'auroc'
+    
+    # 获取类别权重
+    class_weights = train_dataset.get_class_weights() if use_class_weights else None
+    
+    logger.info(f"\n训练配置:")
+    logger.info(f"  轮数: {num_epochs}")
+    logger.info(f"  学习率: {learning_rate}")
+    logger.info(f"  权重衰减: {weight_decay}")
+    logger.info(f"  批大小: {config.training.batch_size}")
+    logger.info(f"  标签平滑: {label_smoothing}")
+    logger.info(f"  使用类别权重: {use_class_weights}")
+    logger.info(f"  早停耐心值: {early_stopping_patience}")
+    logger.info(f"  主要指标: {primary_metric}")
+    
     # 导入训练器
     from src.trainers.downstream_trainer import DownstreamTrainer
     
-    # 创建训练器
+    # 创建训练器（参数与微调脚本保持一致）
     trainer = DownstreamTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
         config=config,
+        num_epochs=num_epochs,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_epochs=warmup_epochs,
+        min_lr=min_lr,
+        label_smoothing=label_smoothing,
+        class_weights=class_weights,
+        use_amp=use_amp,
+        grad_clip_norm=grad_clip_norm,
+        early_stopping_patience=early_stopping_patience,
+        log_interval=log_interval,
+        save_interval=save_interval,
         output_dir=output_dir,
+        experiment_name=args.experiment_name,
+        seed=args.seed,
+        task_name=args.task,
+        primary_metric=primary_metric,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
-        experiment_name=args.experiment_name,
         use_gpu_augment=use_gpu_augment,
     )
     

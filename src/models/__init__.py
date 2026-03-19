@@ -2,7 +2,7 @@
 PA-HCL 的模型架构。
 
 此包提供：
-- 编码器架构 (CNN, CNN-Mamba, CNN-Transformer)
+- 编码器架构 (CNN-Mamba, SinCNeXt-BM[类型名: sincnet_eca_mamba])
 - 用于对比学习的投影头
 - 用于下游任务的分类头
 - 通道注意力模块 (ECA, SE, CBAM)
@@ -32,8 +32,7 @@ from .encoder import (
     MultiScaleConvBlock,
     CNNBackbone,
     CNNMambaEncoder,
-    CNNTransformerEncoder,
-    PositionalEncoding,
+    SincNetECAMambaEncoder,
     build_encoder,
 )
 
@@ -70,8 +69,7 @@ __all__ = [
     "ResidualConvBlock",
     "CNNBackbone",
     "CNNMambaEncoder",
-    "CNNTransformerEncoder",
-    "PositionalEncoding",
+    "SincNetECAMambaEncoder",
     "build_encoder",
     # Heads
     "ProjectionHead",

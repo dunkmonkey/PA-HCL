@@ -35,13 +35,19 @@ model:
   mamba_d_model: 256
   mamba_n_layers: 4
   
-  # SincNet+ECA+Mamba 配置 (当 encoder_type="sincnet_eca_mamba" 时使用)
+  # SinCNeXt-BM 配置 (当 encoder_type="sincnet_eca_mamba" 时使用)
   # 如果使用新编码器预训练的模型，设置为:
   # encoder_type: "sincnet_eca_mamba"
+  # sinc_stride: 1
+  # sinc_min_low_hz: 20.0
+  # sinc_max_high_hz: 500.0
+  # local_dim: 128
+  # convnext_kernel_size: 7
   # mamba_d_model: 128
-  # mamba_n_layers: 2
+  # mamba_n_layers: 6
+  # use_bidirectional: true
   # pool_type: "asp"
-  # cycle_output_dim: 192
+  # cycle_output_dim: 256
 
 # 分类器设置
 classifier:

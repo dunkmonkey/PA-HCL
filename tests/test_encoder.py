@@ -19,7 +19,7 @@
 3. 运行特定测试类:
    pytest tests/test_encoder.py::TestCNNBackbone -v
    pytest tests/test_encoder.py::TestCNNMambaEncoder -v
-   pytest tests/test_encoder.py::TestCNNTransformerEncoder -v
+
    pytest tests/test_encoder.py::TestEncoderFactory -v
 
 4. 运行带覆盖率的测试:
@@ -95,20 +95,6 @@ def cnn_mamba_encoder(device):
         mamba_d_model=256,
         mamba_n_layers=2,
         mamba_dropout=0.0
-    ).to(device)
-
-
-@pytest.fixture
-def cnn_transformer_encoder(device):
-    """创建 CNN-Transformer 编码器实例。"""
-    from src.models.encoder import CNNTransformerEncoder
-    return CNNTransformerEncoder(
-        in_channels=1,
-        cnn_channels=[32, 64, 128, 256],
-        cnn_strides=[2, 2, 2, 2],
-        transformer_d_model=256,
-        transformer_n_layers=2,
-        transformer_dropout=0.0
     ).to(device)
 
 
@@ -327,44 +313,10 @@ class TestCNNMambaEncoder:
         assert grad_exists, "No gradients found"
 
 
-# ============== Test CNNTransformerEncoder ==============
-
-class TestCNNTransformerEncoder:
-    """CNN-Transformer 编码器的测试。"""
-    
-    def test_transformer_encoder_output(self, cnn_transformer_encoder, sample_signal):
-        """测试 Transformer 编码器输出。"""
-        output = cnn_transformer_encoder(sample_signal)
-        
-        assert output.shape == (BATCH_SIZE, 256)
-    
-    def test_transformer_sequence_output(self, cnn_transformer_encoder, sample_signal):
-        """测试 Transformer 编码器的序列输出。"""
-        output = cnn_transformer_encoder(sample_signal, return_sequence=True)
-        
-        # With CLS token, should have extra position
-        # But default is mean pooling, so no extra
-        assert output.dim() == 3
-        assert output.shape[0] == BATCH_SIZE
-        assert output.shape[2] == 256
-
-
 # ============== Test Factory Function ==============
 
 class TestEncoderFactory:
     """编码器工厂函数的测试。"""
-    
-    def test_build_cnn_only(self, device):
-        """测试构建仅 CNN 编码器。"""
-        from src.models.encoder import build_encoder, CNNBackbone
-        
-        encoder = build_encoder(
-            encoder_type="cnn_only",
-            in_channels=1,
-            channels=[32, 64, 128]
-        ).to(device)
-        
-        assert isinstance(encoder, CNNBackbone)
     
     def test_build_cnn_mamba(self, device):
         """测试构建 CNN-Mamba 编码器。"""
@@ -379,18 +331,18 @@ class TestEncoderFactory:
         
         assert isinstance(encoder, CNNMambaEncoder)
     
-    def test_build_cnn_transformer(self, device):
-        """测试构建 CNN-Transformer 编码器。"""
-        from src.models.encoder import build_encoder, CNNTransformerEncoder
+    def test_build_resnet34_1d(self, device):
+        """测试构建 ResNet1D34 编码器。"""
+        from src.models.encoder import build_encoder, ResNet1D34Encoder
         
         encoder = build_encoder(
-            encoder_type="cnn_transformer",
-            cnn_channels=[32, 64, 128],
-            transformer_d_model=128,
-            transformer_n_layers=2
+            encoder_type="resnet34_1d",
+            in_channels=1,
+            dropout=0.0
         ).to(device)
         
-        assert isinstance(encoder, CNNTransformerEncoder)
+        assert isinstance(encoder, ResNet1D34Encoder)
+        assert encoder.out_dim == 512
     
     def test_invalid_encoder_type(self):
         """测试无效编码器类型的错误处理。"""
@@ -451,41 +403,6 @@ class TestEncoderIntegration:
         sub_feats = encoder.get_sub_features(x)
         assert sub_feats.dim() == 3
     
-    def test_model_parameter_count(self, device):
-        """报告不同配置的模型大小。"""
-        from src.models.encoder import CNNMambaEncoder, CNNTransformerEncoder
-        
-        configs = {
-            "Small": {"cnn_channels": [32, 64, 128], "d_model": 128, "n_layers": 2},
-            "Medium": {"cnn_channels": [32, 64, 128, 256], "d_model": 256, "n_layers": 4},
-            "Large": {"cnn_channels": [64, 128, 256, 512], "d_model": 512, "n_layers": 6},
-        }
-        
-        print("\n=== Model Parameter Counts ===")
-        
-        for name, cfg in configs.items():
-            # Mamba
-            mamba_enc = CNNMambaEncoder(
-                cnn_channels=cfg["cnn_channels"],
-                mamba_d_model=cfg["d_model"],
-                mamba_n_layers=cfg["n_layers"]
-            ).to(device)
-            
-            mamba_params = sum(p.numel() for p in mamba_enc.parameters())
-            
-            # Transformer
-            transformer_enc = CNNTransformerEncoder(
-                cnn_channels=cfg["cnn_channels"],
-                transformer_d_model=cfg["d_model"],
-                transformer_n_layers=cfg["n_layers"]
-            ).to(device)
-            
-            transformer_params = sum(p.numel() for p in transformer_enc.parameters())
-            
-            print(f"\n{name}:")
-            print(f"  CNN-Mamba: {mamba_params:,} params ({mamba_params * 4 / 1024 / 1024:.2f} MB)")
-            print(f"  CNN-Transformer: {transformer_params:,} params ({transformer_params * 4 / 1024 / 1024:.2f} MB)")
-    
     def test_gradient_checkpointing_memory(self, device):
         """测试梯度检查点的内存效率 (如果可用)。"""
         if not torch.cuda.is_available():
@@ -510,6 +427,105 @@ class TestEncoderIntegration:
         
         peak_mem = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"\nPeak GPU memory: {peak_mem:.2f} MB")
+
+
+# ============== ResNet1D34 编码器测试 ==============
+
+class TestResNet1D34Encoder:
+    """1D ResNet-34 编码器的测试。"""
+    
+    @staticmethod
+    @pytest.fixture
+    def encoder(device):
+        """创建 ResNet1D34 编码器。"""
+        from src.models.encoder import ResNet1D34Encoder
+        return ResNet1D34Encoder(in_channels=1, dropout=0.0).to(device)
+    
+    @staticmethod
+    @pytest.fixture
+    def sample_signal(device):
+        """创建样本信号。"""
+        # 单个心动周期：1 秒 @ 5000Hz = 5000 样本
+        batch_size = 4
+        signal_length = 5000
+        return torch.randn(batch_size, 1, signal_length, device=device)
+    
+    def test_encoder_output_shape(self, encoder, sample_signal):
+        """测试编码器输出形状。"""
+        output = encoder(sample_signal)
+        
+        # 预期输出: [B, 512]
+        assert output.shape == (4, 512)
+        assert output.dtype == torch.float32
+    
+    def test_sub_features_shape(self, encoder, sample_signal):
+        """测试子结构特征输出形状。"""
+        sub_feats = encoder.get_sub_features(sample_signal)
+        
+        # 预期：Layer3 输出 [B, 256, L/16]
+        # L/16 = 5000/16 ≈ 312
+        assert sub_feats.shape[0] == 4  # 批大小
+        assert sub_feats.shape[1] == 256  # 通道数（Layer3）
+        assert sub_feats.dim() == 3  # 三维张量
+    
+    def test_return_intermediate(self, encoder, sample_signal):
+        """测试返回中间特征。"""
+        result = encoder(sample_signal, return_intermediate=True)
+        
+        assert isinstance(result, dict)
+        assert "cycle_features" in result
+        assert "sub_features" in result
+        assert "sequence" in result
+        
+        # 检查形状
+        assert result["cycle_features"].shape == (4, 512)
+        assert result["sub_features"].shape[0] == 4
+        assert result["sub_features"].shape[1] == 256
+    
+    def test_output_dimension_property(self, encoder):
+        """测试输出维度属性。"""
+        assert encoder.out_dim == 512
+    
+    def test_forward_without_channel_dim(self, encoder, device):
+        """测试不带通道维度的输入处理。"""
+        # 输入: [B, L]（无通道维度）
+        signal = torch.randn(2, 5000, device=device)
+        
+        output = encoder(signal)
+        
+        assert output.shape == (2, 512)
+    
+    def test_training_mode(self, encoder, sample_signal):
+        """测试训练模式下的前向传播和梯度。"""
+        encoder.train()
+        
+        output = encoder(sample_signal)
+        loss = output.sum()
+        loss.backward()
+        
+        # 检查是否有梯度
+        grad_exists = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for p in encoder.parameters()
+        )
+        assert grad_exists
+    
+    def test_long_signal(self, encoder, device):
+        """测试较长的信号（5秒 @ 5000Hz）。"""
+        # 5 秒 = 25000 样本
+        long_signal = torch.randn(2, 1, 25000, device=device)
+        
+        output = encoder(long_signal)
+        
+        assert output.shape == (2, 512)
+    
+    def test_parameter_count(self, encoder):
+        """测试参数数量（约 21M）。"""
+        total_params = sum(p.numel() for p in encoder.parameters())
+        
+        # ResNet-34 约 21M 参数
+        # 允许一些误差范围
+        assert 20_000_000 < total_params < 22_000_000
 
 
 # ============== Entry Point ==============
