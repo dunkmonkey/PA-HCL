@@ -63,6 +63,7 @@ from src.config import load_config
 from src.utils.seed import set_seed
 from src.data.dataset import PCGDownstreamDataset
 from src.models.encoder import build_encoder
+from src.models.encoder_specs import get_encoder_build_kwargs, format_encoder_arch_log
 from src.models.heads import ClassificationHead
 
 
@@ -189,27 +190,20 @@ def load_model_and_data(args):
     print(f"任务: {args.task}")
     print(f"类别数: {num_classes}")
     
-    # 构建编码器参数
-    encoder_kwargs = {
-        'in_channels': 1,
-        'cnn_channels': config.model.cnn_channels,
-        'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
-        'cnn_strides': config.model.cnn_strides,
-        'mamba_d_model': getattr(config.model, 'mamba_d_model', 256),
-        'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 4),
-        'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
-        'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
-        'drop_path_rate': getattr(config.model, 'drop_path_rate', 0.0),
-        'attention_type': getattr(config.model, 'attention_type', 'none'),
-        'use_bidirectional': getattr(config.model, 'use_bidirectional', False),
-    }
+    encoder_kwargs = get_encoder_build_kwargs(
+        config.model.encoder_type,
+        sample_rate=getattr(config.data, 'sample_rate', 5000),
+        num_substructures=getattr(config.data, 'num_substructures', 4),
+    )
+    print("本次评估编码器结构:")
+    print(format_encoder_arch_log(config.model.encoder_type, encoder_kwargs))
     
     encoder = build_encoder(
         encoder_type=config.model.encoder_type,
         **encoder_kwargs
     )
     
-    encoder_dim = config.model.mamba_d_model if hasattr(config.model, 'mamba_d_model') else 256
+    encoder_dim = getattr(encoder, 'out_dim', getattr(encoder, 'cycle_output_dim', 256))
     
     # 创建模型
     model = SupervisedModel(

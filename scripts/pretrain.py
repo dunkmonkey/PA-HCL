@@ -35,6 +35,7 @@ import torch.multiprocessing as mp
 from omegaconf import OmegaConf
 
 from src.config import load_config, save_config, build_effective_run_config, build_config_summary
+from src.models.encoder_specs import get_encoder_arch_spec, format_encoder_arch_log
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 
@@ -177,6 +178,9 @@ def main():
         logger.info("=" * 60)
         logger.info("PA-HCL 预训练")
         logger.info("=" * 60)
+        encoder_type = getattr(config.model, "encoder_type", "cnn_mamba")
+        arch = get_encoder_arch_spec(encoder_type)
+        logger.info("本次训练编码器结构:\n%s", format_encoder_arch_log(encoder_type, arch))
 
         config_summary = build_config_summary(config, stage="pretrain")
         logger.info("配置摘要（统一模板）:\n%s", OmegaConf.to_yaml(config_summary, resolve=True))

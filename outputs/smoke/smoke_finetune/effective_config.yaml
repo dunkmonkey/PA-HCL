@@ -1,0 +1,65 @@
+experiment:
+  name: pahcl_finetune
+seed: 42
+task:
+  name: physionet2016
+data:
+  sample_rate: 5000
+  target_length: 4000
+  num_substructures: 4
+data_cache:
+  use_gpu_augment: true
+model:
+  encoder_type: cnn_mamba
+  encoder_arch:
+    cnn_channels:
+    - 32
+    - 64
+    - 128
+    - 256
+    cnn_kernel_sizes:
+    - 7
+    - 5
+    - 5
+    - 3
+    cnn_strides:
+    - 2
+    - 2
+    - 2
+    - 2
+    cnn_dropout: 0.1
+    mamba_d_model: 256
+    mamba_n_layers: 4
+    mamba_d_state: 16
+    mamba_d_conv: 4
+    mamba_expand: 2
+    mamba_dropout: 0.1
+    pool_type: mean
+    drop_path_rate: 0.1
+    attention_type: eca
+    use_bidirectional: false
+    bidirectional_fusion: add
+    use_multiscale: false
+    multiscale_kernel_sizes:
+    - 3
+    - 7
+    - 15
+training:
+  num_epochs: 100
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 5
+  min_lr: 1.0e-07
+  label_smoothing: 0.1
+  use_class_weights: true
+  early_stopping_patience: 15
+  use_amp: true
+  log_interval: 20
+  save_interval: 10
+classifier:
+  hidden_dim: 128
+  dropout: 0.3
+  num_classes: 2
+evaluation:
+  primary_metric: auroc

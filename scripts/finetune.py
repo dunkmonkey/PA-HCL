@@ -51,6 +51,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from src.config import load_config, save_config, build_effective_run_config, build_config_summary
+from src.models.encoder_specs import get_encoder_arch_spec, format_encoder_arch_log
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 
@@ -304,6 +305,10 @@ def main():
     if args.few_shot:
         logger.info(f"小样本学习: {args.shot_ratio*100:.1f}%")
     logger.info(f"输出目录: {output_dir}")
+    
+    encoder_type = getattr(config.model, "encoder_type", "cnn_mamba")
+    arch = get_encoder_arch_spec(encoder_type)
+    logger.info("本次训练编码器结构:\n%s", format_encoder_arch_log(encoder_type, arch))
 
     effective_config = build_effective_run_config(config, stage="finetune")
     config_summary = build_config_summary(config, stage="finetune")

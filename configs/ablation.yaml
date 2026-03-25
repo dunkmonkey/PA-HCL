@@ -16,20 +16,11 @@ data:
 
 # 基础模型设置 (PA-HCL 默认)
 model:
-  encoder_type: "cnn_mamba"  # 选项: cnn_mamba, sincnet_eca_mamba
-  
-  # CNN 主干网络
-  cnn_channels: [32, 64, 128, 256]
-  cnn_kernel_sizes: [7, 5, 5, 3]
-  cnn_strides: [2, 2, 2, 2]
-  
-  # Mamba (SSM) 设置
-  mamba_d_model: 256
-  mamba_n_layers: 4
-  mamba_d_state: 16
-  mamba_expand: 2
-  
-  # 投影头
+  # 选项: cnn_mamba, sincnet_eca_mamba
+  # 编码器结构参数由代码硬编码，不在配置中维护。
+  encoder_type: "cnn_mamba"
+
+  # 投影头维度（可实验）
   projection_dim: 128
 
 # 基础损失设置

@@ -1,154 +1,58 @@
-# PA-HCL 统一预训练配置（单文件）
-# ==================================
-# 目标：在同一个配置中无伤切换编码器，避免多配置文件混用。
-#
-# 用法：
-#   在本文件中修改 model.encoder_type 后运行：
-#   python scripts/pretrain.py --config configs/pretrain.yaml
-#
-# 说明：
-# - 默认以通用参数为主；
-# - 当切换 encoder_type 时，build_pahcl_model 会自动优先读取对应前缀参数：
-#   - cnn_*（用于 cnn_mamba）
-#   - sinc_*（用于 sincnet_eca_mamba）
+# PA-HCL 统一预训练配置（精简版）
+# 说明：编码器结构参数已在代码中统一硬编码。
 
-# 实验信息
 experiment:
   name: "pahcl_pretrain"
-  description: "PCG 数据的 PA-HCL 自监督预训练（统一配置）"
+  description: "PCG 数据的 PA-HCL 自监督预训练"
 
-# 数据设置（pretrain.py 实际使用 processed_dir / sample_rate / num_substructures）
 data:
   processed_dir: "/root/autodl-tmp/data/processed"
   sample_rate: 5000
   num_substructures: 4
 
-# 模型架构
 model:
-  # 编码器开关（核心）
-  encoder_type: "cnn_mamba"  # "cnn_mamba", "sincnet_eca_mamba"
-
-  # ---------------- 通用 CNN 前端参数（cnn_mamba 使用） ----------------
-  cnn_channels: [32, 64, 128, 256]
-  cnn_kernel_sizes: [7, 5, 5, 3]
-  cnn_strides: [2, 2, 2, 2]
-  cnn_dropout: 0.1
-
-  # ---------------- 编码器专属 Mamba 参数（自动按 encoder_type 选择） ----------------
-  # CNN-Mamba 推荐（原 pretrain.yaml 实际参数）
-  cnn_mamba_d_model: 256
-  cnn_mamba_n_layers: 4
-  cnn_mamba_d_state: 16
-  cnn_mamba_d_conv: 4
-  cnn_mamba_expand: 2
-  cnn_mamba_dropout: 0.1
-  cnn_pool_type: "mean"
-
-  # SinCNeXt-BM 推荐（原 pretrain.yaml 实际参数）
-  sinc_mamba_d_model: 128
-  sinc_mamba_n_layers: 6
-  sinc_mamba_d_state: 16
-  sinc_mamba_d_conv: 4
-  sinc_mamba_expand: 2
-  sinc_mamba_dropout: 0.1
-  sinc_pool_type: "asp"
-
-  # 向后兼容通用键（当专属键未设置时使用）
-  mamba_d_model: 256
-  mamba_n_layers: 4
-  mamba_d_state: 16
-  mamba_d_conv: 4
-  mamba_expand: 2
-  mamba_dropout: 0.1
-  pool_type: "mean"
-
-  # ---------------- SinCNeXt-BM 参数（仅 sincnet_eca_mamba 生效） ----------------
-  # 限频 SincNet
-  sinc_out_channels: 64
-  sinc_kernel_size: 251
-  sinc_stride: 1
-  sinc_min_low_hz: 20.0
-  sinc_min_band_hz: 20.0
-  sinc_max_high_hz: 500.0
-
-  # ConvNeXt Local Stage
-  local_dim: 128
-  convnext_kernel_size: 7
-  convnext_expansion: 4
-
-  # Bi-Mamba + 归一化
-  use_bidirectional: true
-  bidirectional_fusion: "add"
-  use_groupnorm: true
-  num_groups: 8
-  drop_path_rate: 0.1
-
-  # 输出配置（SinCNeXt-BM ASP 输出）
-  cycle_output_dim: 256
-
-  # 投影头（两种编码器共用）
+  encoder_type: "cnn_mamba"  # 可选: cnn_mamba, sincnet_eca_mamba
   proj_hidden_dim: 512
   proj_output_dim: 128
   proj_num_layers: 2
-
-  # 子结构投影头
   sub_proj_hidden_dim: 256
   sub_proj_output_dim: 64
-
-  # MoCo 设置
   use_moco: false
   moco_momentum: 0.999
   queue_size: 8192
 
-# 损失函数
 loss:
   temperature: 0.07
   lambda_cycle: 1.0
   lambda_sub: 1.0
   align_substructures: true
 
-# 训练设置
 training:
-  # 基础设置
   num_epochs: 100
   batch_size: 64
   num_workers: 4
   pin_memory: true
   prefetch_factor: 2
-
-  # 优化器
   learning_rate: 2e-3
   weight_decay: 1e-4
   adam_beta1: 0.9
   adam_beta2: 0.999
   adam_eps: 1e-8
-
-  # 调度器
   warmup_epochs: 20
   min_lr: 1e-6
-
-  # 训练技巧
   use_amp: true
-  gradient_accumulation_steps: 4  # 有效 batch_size = 64 * 4 = 256
+  gradient_accumulation_steps: 4
   grad_clip_norm: 1.0
-
-  # 日志和保存
   log_interval: 50
   save_interval: 10
 
-# 数据增强
 augmentation:
-  # 时域
   time_shift_max: 0.1
   amplitude_scale_range: [0.8, 1.2]
   gaussian_noise_std: 0.01
   time_stretch_range: [0.9, 1.1]
-
-  # 频域
   time_mask_max_ratio: 0.006
   freq_mask_max_ratio: 0.15
-
-  # 概率
   prob_time_shift: 0.5
   prob_amplitude_scale: 0.5
   prob_gaussian_noise: 0.5
@@ -156,10 +60,8 @@ augmentation:
   prob_time_mask: 0.5
   prob_freq_mask: 0.3
 
-# 分布式训练
 distributed:
   backend: "nccl"
   find_unused_parameters: false
 
-# 可复现性
 seed: 42

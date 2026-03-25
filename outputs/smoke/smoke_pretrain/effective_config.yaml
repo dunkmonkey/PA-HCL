@@ -1,0 +1,62 @@
+experiment:
+  name: pahcl_pretrain
+seed: 42
+task:
+  name: null
+data:
+  sample_rate: 5000
+  target_length: 4000
+  num_substructures: 4
+data_cache:
+  use_gpu_augment: true
+model:
+  encoder_type: cnn_mamba
+  encoder_arch:
+    cnn_channels:
+    - 32
+    - 64
+    - 128
+    - 256
+    cnn_kernel_sizes:
+    - 7
+    - 5
+    - 5
+    - 3
+    cnn_strides:
+    - 2
+    - 2
+    - 2
+    - 2
+    cnn_dropout: 0.1
+    mamba_d_model: 256
+    mamba_n_layers: 4
+    mamba_d_state: 16
+    mamba_d_conv: 4
+    mamba_expand: 2
+    mamba_dropout: 0.1
+    pool_type: mean
+    drop_path_rate: 0.1
+    attention_type: eca
+    use_bidirectional: false
+    bidirectional_fusion: add
+    use_multiscale: false
+    multiscale_kernel_sizes:
+    - 3
+    - 7
+    - 15
+training:
+  num_epochs: 100
+  batch_size: 64
+  learning_rate: 0.002
+  weight_decay: 0.0001
+  warmup_epochs: 20
+  min_lr: 1.0e-06
+  use_amp: true
+  gradient_accumulation_steps: 4
+  grad_clip_norm: 1.0
+  log_interval: 50
+  save_interval: 10
+loss:
+  temperature: 0.07
+  lambda_cycle: 1.0
+  lambda_sub: 1.0

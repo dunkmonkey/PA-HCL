@@ -1,184 +1,54 @@
-# PA-HCL 监督学习基线配置
-# ==================================
-# 用于从零训练（不使用预训练权重）验证编码器架构的有效性
-# 
-# 用法:
-#   # 测试 CNN-Mamba 编码器
-#   python scripts/train_supervised_baseline.py --task physionet2016
-#   
-#   # 测试 SinCNeXt-BM 编码器（沿用类型名 sincnet_eca_mamba）
-#   python scripts/train_supervised_baseline.py --task physionet2016 --encoder-type sincnet_eca_mamba
+# PA-HCL 监督学习基线配置（精简版）
+# 说明：编码器结构参数已在代码中统一硬编码。
 
 experiment:
   name: "supervised_baseline"
-  description: "从零训练的监督学习基线，用于验证编码器设计"
+  description: "从零训练的监督学习基线"
 
-# 任务设置 (被 --task 参数覆盖)
 task:
   name: "physionet2016"
   type: "classification"
 
-# 数据设置
 data:
   sample_rate: 5000
   target_length: 4000
   num_substructures: 4
 
-# 模型架构配置
 model:
-  # 编码器类型: cnn_mamba, sincnet_eca_mamba, resnet34_1d
+  # 可选: cnn_mamba, sincnet_eca_mamba, resnet34_1d
   encoder_type: "cnn_mamba"
-  
-  # CNN 配置 (用于 cnn_mamba)
-  cnn_channels: [32, 64, 128, 256]
-  cnn_kernel_sizes: [7, 5, 5, 3]
-  cnn_strides: [2, 2, 2, 2]
-  
-  # Mamba 配置 (当 encoder_type="cnn_mamba" 时使用)
-  mamba_d_model: 256
-  mamba_n_layers: 4
-  mamba_d_state: 16
-  mamba_d_conv: 4
-  mamba_expand_factor: 2
-  
-  # ============== SinCNeXt-BM 配置 (替代原 SincNet+ECA+Mamba) ==============
-  # 启用方式: 将 encoder_type 设为 "sincnet_eca_mamba"
-  # 结构: 限频 SincNet -> ConvNeXt Local -> 6层 Bi-Mamba -> Dynamic Mask + ASP
-  #
-  # 快速开始:
-  #   python scripts/train_supervised_baseline.py \
-  #     --task physionet2016 \
-  #     --encoder-type sincnet_eca_mamba
-  #
-  # 配置参数:
-  sinc_out_channels: 64        # SincNet 输出通道数
-  sinc_kernel_size: 251        # SincNet 卷积核大小
-  sinc_stride: 1               # SincNet 步幅 (SinCNeXt-BM 默认不下采样)
-  sinc_min_low_hz: 20.0        # 频带下限 (Hz)
-  sinc_min_band_hz: 20.0       # 最小带宽 (Hz)
-  sinc_max_high_hz: 500.0      # 频带上限 (Hz)
-  local_dim: 128               # ConvNeXt / Mamba 主维度
-  convnext_kernel_size: 7      # ConvNeXt 深度卷积核
-  convnext_expansion: 4        # ConvNeXt 通道扩张倍数
-  # mamba_d_model: 128         # 建议设为 128（与 local_dim 一致）
-  # mamba_n_layers: 6          # 建议设为 6（Bi-Mamba 深度）
-  use_groupnorm: true          # 使用 GroupNorm (推荐)
-  num_groups: 8                # GroupNorm 分组数
-  cycle_output_dim: 256        # 周期级输出维度（ASP 输出）
-  pool_type: "asp"             # 池化类型: asp 或 mean
-  
-  # ============== 新增：正则化和注意力 ==============
-  # 通道注意力: "none", "eca", "se", "cbam"
-  # - eca: 高效通道注意力（推荐，轻量高效）
-  # - se: Squeeze-and-Excitation（效果稳定但参数更多）
-  # - cbam: 通道+空间注意力（最强但最慢）
-  attention_type: "eca"
-  
-  # DropPath (随机深度) 正则化
-  # 概率从第一层 0 线性递增到最后一层的 drop_path_rate
-  # 推荐值: 0.1 ~ 0.3
-  drop_path_rate: 0.1
-  
-  # 双向 Mamba (SinCNeXt-BM 推荐开启)
-  use_bidirectional: true
-  bidirectional_fusion: "add"  # "add", "concat", "gate"
-  
-  # ============== 多尺度并行卷积 ==============
-  # 使用多个不同大小卷积核并行处理，捕获多尺度时间特征
-  # - 小卷积核 (3): 高频局部特征（杂音高频成分）
-  # - 中卷积核 (7): 中频模式（S1/S2 心音）
-  # - 大卷积核 (15): 低频趋势（心动周期整体形态）
-  # 注意：启用后会增加约 30% 的参数量
-  use_multiscale: false
-  multiscale_kernel_sizes: [3, 7, 15]
 
-  # ============== 1D-ResNet34 配置（仅监督学习基线使用） ==============
-  # 简洁的 ResNet 基线：无 mamba/transformer，纯残差卷积网络
-  # 命名：resnet34_1d（表示 1D ResNet-34）
-  # 
-  # 快速开始:
-  #   python scripts/train_supervised_baseline.py \
-  #     --task physionet2016 \
-  #     --encoder-type resnet34_1d
-  #
-  # 网络结构（固定，无超参数）:
-  #   Stem: Conv1D(k=15, s=2, p=7, c=64) + BN + ReLU + MaxPool(k=3, s=2, p=1)
-  #   Layer1: 3×BasicBlock (c=64, k=7, s=1)
-  #   Layer2: 4×BasicBlock (c=128, k=5, s=2)
-  #   Layer3: 6×BasicBlock (c=256, k=3, s=2)
-  #   Layer4: 3×BasicBlock (c=512, k=3, s=2)
-  #   头部: Global Average Pooling → 512维特征
-  #
-  # 优点：
-  #   - 参数量小（仅约 21M，相比 SincNet+Mamba）
-  #   - 训练快速，显存占用低
-  #   - 作为监督学习基线验证编码器通用性
-  #
-  # 注意事项：
-  #   - 当前版本仅支持监督学习基线，不支持预训练或微调
-  #   - 如需预训练支持，需单独扩展
-  resnet34_1d_dropout: 0.0
-
-# 分类器设置
 classifier:
-  hidden_dim: 128  # 设为 null 以使用线性分类器
-  dropout: 0.5     # 增大 dropout 缓解过拟合 (原 0.3)
-  use_bn: true     # 使用 BatchNorm
-  use_ln: false    # 使用 LayerNorm (与 use_bn 互斥)
-  num_layers: 1    # 隐藏层数量 (1 或 2)
+  hidden_dim: 128
+  dropout: 0.5
+  use_bn: true
+  use_ln: false
+  num_layers: 1
 
-# 训练设置
 training:
-  # 基础参数
   num_epochs: 50
   batch_size: 128
   learning_rate: 1e-3
   weight_decay: 1e-4
-  
-  # 学习率调度
   warmup_epochs: 10
   min_lr: 1e-7
-  scheduler: "cosine"  # cosine 或 plateau
-  
-  # 正则化
+  scheduler: "cosine"
   label_smoothing: 0.1
   use_class_weights: true
   grad_clip_norm: 1.0
-  
-  # ============== 类别平衡采样 ==============
-  # 启用 WeightedRandomSampler 解决类别不平衡问题
-  # 优点：不改变损失函数，直接在采样阶段平衡类别
-  # 缺点：少数类样本会被重复采样
   use_balanced_sampling: true
-  
-  # ============== 损失函数选择 ==============
-  # 损失函数类型: "ce", "focal", "label_smoothing"
-  # - ce: 标准交叉熵 (推荐，配合 use_balanced_sampling 或 use_class_weights)
-  # - focal: Focal Loss (谨慎使用，gamma 过大会降低特异性)
   loss_type: "ce"
-  
-  # Focal Loss 参数 (仅当 loss_type="focal" 时生效)
-  # 注意：gamma >= 2.0 可能导致正常样本学习不足，特异性下降
-  focal_gamma: 1.0  # 降低 gamma，推荐值 [0.5, 1.5]
-  
-  # 早停
+  focal_gamma: 1.0
   early_stopping_patience: 20
-  
-  # 混合精度训练
   use_amp: true
-  
-  # 数据加载
   num_workers: 4
   pin_memory: true
-  
-  # 日志和保存
   log_interval: 20
   save_interval: 10
   save_best_only: false
 
-# 评估设置
 evaluation:
-  primary_metric: "auroc"  # 主要评估指标: auroc, f1_macro, accuracy
+  primary_metric: "auroc"
   metrics:
     - accuracy
     - f1
@@ -191,14 +61,12 @@ evaluation:
   save_confusion_matrix: true
   save_predictions: true
 
-# 优化器设置
 optimizer:
-  type: "adamw"  # adamw 或 sgd
+  type: "adamw"
   betas: [0.9, 0.999]
   eps: 1e-8
-  momentum: 0.9  # 用于 SGD
+  momentum: 0.9
 
-# 实验跟踪
 tracking:
   use_wandb: false
   wandb_project: "PA-HCL-Supervised"
@@ -206,16 +74,11 @@ tracking:
   use_tensorboard: true
   save_model_summary: true
 
-# 可复现性
 seed: 42
-
-# 设备设置
-device: "cuda"  # cuda 或 cpu
+device: "cuda"
 distributed: false
 
-# ============== 数据缓存 ==============
 data_cache:
   cache_in_memory: true
   view_cache_refresh_epochs: 5
   use_gpu_augment: true
-

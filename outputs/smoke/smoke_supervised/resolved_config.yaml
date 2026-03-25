@@ -1,0 +1,121 @@
+experiment:
+  name: supervised_baseline
+  seed: 42
+  output_dir: ./checkpoints
+  log_dir: ./logs
+  description: 从零训练的监督学习基线
+data:
+  processed_dir: /root/autodl-tmp/data/processed
+  sample_rate: 5000
+  target_length: 4000
+  num_substructures: 4
+  base_dir: /root/autodl-tmp/data/downstream
+  task_name: physionet2016
+augmentation:
+  time_shift_max: 0.1
+  amplitude_scale_range:
+  - 0.8
+  - 1.2
+  gaussian_noise_std: 0.01
+  time_stretch_range:
+  - 0.9
+  - 1.1
+  time_mask_max_ratio: 0.006
+  freq_mask_max_ratio: 0.15
+  prob_time_shift: 0.5
+  prob_amplitude_scale: 0.5
+  prob_gaussian_noise: 0.5
+  prob_time_stretch: 0.3
+  prob_time_mask: 0.5
+  prob_freq_mask: 0.3
+model:
+  encoder_type: cnn_mamba
+  proj_hidden_dim: 512
+  proj_output_dim: 128
+  proj_num_layers: 2
+  sub_proj_hidden_dim: 256
+  sub_proj_output_dim: 64
+  use_moco: false
+  moco_momentum: 0.999
+  queue_size: 8192
+classifier:
+  hidden_dim: 128
+  dropout: 0.5
+  use_bn: true
+  use_ln: false
+  num_layers: 1
+loss:
+  temperature: 0.07
+  lambda_cycle: 1.0
+  lambda_sub: 1.0
+  align_substructures: true
+  dynamic_weight:
+    enabled: false
+    warmup_epochs: 10
+training:
+  num_epochs: 50
+  batch_size: 128
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-08
+  warmup_epochs: 10
+  min_lr: 1.0e-07
+  use_amp: true
+  gradient_accumulation_steps: 1
+  grad_clip_norm: 1.0
+  log_interval: 20
+  save_interval: 10
+  label_smoothing: 0.1
+  use_class_weights: true
+  early_stopping_patience: 20
+  use_balanced_sampling: true
+  scheduler: cosine
+  loss_type: ce
+  focal_gamma: 1.0
+  save_best_only: false
+data_cache:
+  cache_in_memory: true
+  use_gpu_augment: true
+  view_cache_refresh_epochs: 5
+distributed: false
+seed: 42
+task:
+  name: physionet2016
+  type: classification
+  dataset: physionet2016
+  description: PhysioNet 2016 心音二分类任务
+evaluation:
+  primary_metric: auroc
+  metrics:
+  - accuracy
+  - auroc
+  - auprc
+  - f1
+  - sensitivity
+  - specificity
+  save_confusion_matrix: true
+  save_predictions: true
+optimizer:
+  type: adamw
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  momentum: 0.9
+tracking:
+  use_wandb: false
+  wandb_project: PA-HCL-Supervised
+  wandb_entity: null
+  use_tensorboard: true
+  save_model_summary: true
+device: cuda
+classification:
+  num_classes: 2
+  label_map:
+    normal: 0
+    abnormal: 1

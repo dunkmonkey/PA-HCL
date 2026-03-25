@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from .encoder import CNNMambaEncoder, build_encoder
+from .encoder_specs import get_encoder_arch_spec
 from .heads import ProjectionHead, SubstructureProjectionHead
 
 
@@ -560,61 +561,47 @@ def build_pahcl_model(config) -> PAHCLModel:
             f"如需支持 ResNet 预训练和微调，请向开发团队反馈。"
         )
     
-    encoder_prefix = 'sinc' if encoder_type == 'sincnet_eca_mamba' else 'cnn'
-
-    def _cfg(
-        key: str,
-        default,
-        encoder_key: Optional[str] = None,
-    ):
-        """读取配置项，优先使用编码器专属键，再回退到通用键。"""
-        if encoder_key is not None:
-            encoder_value = getattr(model_cfg, encoder_key, None)
-            if encoder_value is not None:
-                return encoder_value
-
-        value = getattr(model_cfg, key, None)
-        return default if value is None else value
+    arch = get_encoder_arch_spec(encoder_type)
 
     return PAHCLModel(
         encoder_type=encoder_type,
         in_channels=1,
-        cnn_channels=_cfg('cnn_channels', [32, 64, 128, 256]),
-        cnn_kernel_sizes=_cfg('cnn_kernel_sizes', [7, 5, 5, 3]),
-        cnn_strides=_cfg('cnn_strides', [2, 2, 2, 2]),
-        cnn_dropout=_cfg('cnn_dropout', 0.1),
-        mamba_d_model=_cfg('mamba_d_model', 256, f'{encoder_prefix}_mamba_d_model'),
-        mamba_n_layers=_cfg('mamba_n_layers', 4, f'{encoder_prefix}_mamba_n_layers'),
-        mamba_d_state=_cfg('mamba_d_state', 16, f'{encoder_prefix}_mamba_d_state'),
-        mamba_d_conv=_cfg('mamba_d_conv', 4, f'{encoder_prefix}_mamba_d_conv'),
-        mamba_expand=_cfg('mamba_expand', 2, f'{encoder_prefix}_mamba_expand'),
-        mamba_dropout=_cfg('mamba_dropout', 0.1, f'{encoder_prefix}_mamba_dropout'),
-        pool_type=_cfg('pool_type', 'mean', f'{encoder_prefix}_pool_type'),
-        sinc_out_channels=_cfg('sinc_out_channels', 64),
-        sinc_kernel_size=_cfg('sinc_kernel_size', 251),
-        sinc_stride=_cfg('sinc_stride', 1),
-        sinc_min_low_hz=_cfg('sinc_min_low_hz', 20.0),
-        sinc_min_band_hz=_cfg('sinc_min_band_hz', 20.0),
-        sinc_max_high_hz=_cfg('sinc_max_high_hz', 500.0),
-        local_dim=_cfg('local_dim', 128),
-        convnext_kernel_size=_cfg('convnext_kernel_size', 7),
-        convnext_expansion=_cfg('convnext_expansion', 4),
-        drop_path_rate=_cfg('drop_path_rate', 0.1),
-        use_bidirectional=_cfg('use_bidirectional', True),
-        bidirectional_fusion=_cfg('bidirectional_fusion', 'add'),
-        cycle_output_dim=_cfg('cycle_output_dim', 256),
-        use_groupnorm=_cfg('use_groupnorm', True),
-        num_groups=_cfg('num_groups', 8),
+        cnn_channels=arch.get('cnn_channels', [32, 64, 128, 256]),
+        cnn_kernel_sizes=arch.get('cnn_kernel_sizes', [7, 5, 5, 3]),
+        cnn_strides=arch.get('cnn_strides', [2, 2, 2, 2]),
+        cnn_dropout=arch.get('cnn_dropout', 0.1),
+        mamba_d_model=arch.get('mamba_d_model', 256),
+        mamba_n_layers=arch.get('mamba_n_layers', 4),
+        mamba_d_state=arch.get('mamba_d_state', 16),
+        mamba_d_conv=arch.get('mamba_d_conv', 4),
+        mamba_expand=arch.get('mamba_expand', 2),
+        mamba_dropout=arch.get('mamba_dropout', 0.1),
+        pool_type=arch.get('pool_type', 'mean'),
+        sinc_out_channels=arch.get('sinc_out_channels', 64),
+        sinc_kernel_size=arch.get('sinc_kernel_size', 251),
+        sinc_stride=arch.get('sinc_stride', 1),
+        sinc_min_low_hz=arch.get('sinc_min_low_hz', 20.0),
+        sinc_min_band_hz=arch.get('sinc_min_band_hz', 20.0),
+        sinc_max_high_hz=arch.get('sinc_max_high_hz', 500.0),
+        local_dim=arch.get('local_dim', 128),
+        convnext_kernel_size=arch.get('convnext_kernel_size', 7),
+        convnext_expansion=arch.get('convnext_expansion', 4),
+        drop_path_rate=arch.get('drop_path_rate', 0.1),
+        use_bidirectional=arch.get('use_bidirectional', True),
+        bidirectional_fusion=arch.get('bidirectional_fusion', 'add'),
+        cycle_output_dim=arch.get('cycle_output_dim', 256),
+        use_groupnorm=arch.get('use_groupnorm', True),
+        num_groups=arch.get('num_groups', 8),
         sample_rate=getattr(config.data, 'sample_rate', 5000),
-        cycle_proj_hidden=_cfg('proj_hidden_dim', 512),
-        cycle_proj_output=_cfg('proj_output_dim', 128),
-        cycle_proj_layers=_cfg('proj_num_layers', 2),
-        sub_proj_hidden=_cfg('sub_proj_hidden_dim', 256),
-        sub_proj_output=_cfg('sub_proj_output_dim', 64),
+        cycle_proj_hidden=getattr(model_cfg, 'proj_hidden_dim', 512),
+        cycle_proj_output=getattr(model_cfg, 'proj_output_dim', 128),
+        cycle_proj_layers=getattr(model_cfg, 'proj_num_layers', 2),
+        sub_proj_hidden=getattr(model_cfg, 'sub_proj_hidden_dim', 256),
+        sub_proj_output=getattr(model_cfg, 'sub_proj_output_dim', 64),
         num_substructures=getattr(config.data, 'num_substructures', 4),
         # Step 2 & 3: MoCo 参数
-        use_moco=_cfg('use_moco', False),
-        moco_momentum=_cfg('moco_momentum', 0.999),
-        queue_size=_cfg('queue_size', 8192),
+        use_moco=getattr(model_cfg, 'use_moco', False),
+        moco_momentum=getattr(model_cfg, 'moco_momentum', 0.999),
+        queue_size=getattr(model_cfg, 'queue_size', 8192),
     )
 

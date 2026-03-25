@@ -37,8 +37,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict
-
 # 将项目根目录添加到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -53,6 +51,7 @@ from src.utils.seed import set_seed
 from src.utils.logging import setup_logger
 from src.data.dataset import PCGDownstreamDataset
 from src.models.encoder import build_encoder
+from src.models.encoder_specs import get_encoder_arch_spec, get_encoder_build_kwargs, format_encoder_arch_log
 from src.models.heads import ClassificationHead
 
 
@@ -428,78 +427,14 @@ def create_model(config, num_classes, logger):
     # 创建编码器（从零初始化）
     logger.info(f"编码器类型: {config.model.encoder_type}")
     
-    # 获取新增的模型参数
-    attention_type = getattr(config.model, 'attention_type', 'none')
-    drop_path_rate = getattr(config.model, 'drop_path_rate', 0.0)
-    use_bidirectional = getattr(config.model, 'use_bidirectional', False)
-    bidirectional_fusion = getattr(config.model, 'bidirectional_fusion', 'add')
-    use_multiscale = getattr(config.model, 'use_multiscale', False)
-    multiscale_kernel_sizes = getattr(config.model, 'multiscale_kernel_sizes', [3, 7, 15])
-    
-    logger.info(f"通道注意力类型: {attention_type}")
-    logger.info(f"DropPath 率: {drop_path_rate}")
-    logger.info(f"双向 Mamba: {use_bidirectional}")
-    logger.info(f"多尺度卷积: {use_multiscale}")
-    if use_multiscale:
-        logger.info(f"  多尺度卷积核: {multiscale_kernel_sizes}")
-    
-    # 准备编码器参数
-    encoder_kwargs: Dict[str, Any] = {
-        'in_channels': 1,
-    }
-    
-    # 根据编码器类型添加特定参数
-    if config.model.encoder_type == "cnn_mamba":
-        encoder_kwargs.update({
-            'cnn_channels': config.model.cnn_channels,
-            'cnn_kernel_sizes': config.model.cnn_kernel_sizes,
-            'cnn_strides': config.model.cnn_strides,
-            'mamba_d_model': getattr(config.model, 'mamba_d_model', 256),
-            'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 4),
-            'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
-            'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
-            # 新增参数
-            'drop_path_rate': drop_path_rate,
-            'attention_type': attention_type,
-            'use_bidirectional': use_bidirectional,
-            'bidirectional_fusion': bidirectional_fusion,
-            'use_multiscale': use_multiscale,
-            'multiscale_kernel_sizes': multiscale_kernel_sizes,
-        })
-    elif config.model.encoder_type == "sincnet_eca_mamba":
-        encoder_kwargs.update({
-            'sinc_out_channels': getattr(config.model, 'sinc_out_channels', 64),
-            'sinc_kernel_size': getattr(config.model, 'sinc_kernel_size', 251),
-            'sinc_stride': getattr(config.model, 'sinc_stride', 1),
-            'sinc_min_low_hz': getattr(config.model, 'sinc_min_low_hz', 20.0),
-            'sinc_min_band_hz': getattr(config.model, 'sinc_min_band_hz', 20.0),
-            'sinc_max_high_hz': getattr(config.model, 'sinc_max_high_hz', 500.0),
-            'local_dim': getattr(config.model, 'local_dim', 128),
-            'convnext_kernel_size': getattr(config.model, 'convnext_kernel_size', 7),
-            'convnext_expansion': getattr(config.model, 'convnext_expansion', 4),
-            'mamba_d_model': getattr(config.model, 'mamba_d_model', 256),
-            'mamba_n_layers': getattr(config.model, 'mamba_n_layers', 6),
-            'mamba_d_state': getattr(config.model, 'mamba_d_state', 16),
-            'mamba_d_conv': getattr(config.model, 'mamba_d_conv', 4),
-            'mamba_expand': getattr(config.model, 'mamba_expand_factor', 2),
-            'mamba_dropout': getattr(config.model, 'mamba_dropout', 0.1),
-            'drop_path_rate': drop_path_rate,
-            'cycle_output_dim': getattr(config.model, 'cycle_output_dim', 256),
-            'num_substructures': getattr(config.data, 'num_substructures', 4),
-            'pool_type': getattr(config.model, 'pool_type', 'asp'),
-            'use_bidirectional': getattr(config.model, 'use_bidirectional', True),
-            'bidirectional_fusion': getattr(config.model, 'bidirectional_fusion', 'add'),
-            'sample_rate': getattr(config.data, 'sample_rate', 5000),
-            'use_groupnorm': getattr(config.model, 'use_groupnorm', True),
-            'num_groups': getattr(config.model, 'num_groups', 8),
-        })
-    elif config.model.encoder_type == "resnet34_1d":
-        # 1D-ResNet34：简洁的基线，只需要输入通道
-        encoder_kwargs.update({
-            'in_channels': 1,
-            'dropout': getattr(config.model, 'dropout', 0.0),
-        })
-        logger.info("使用 ResNet1D34 作为编码器（仅用于监督学习基线）")
+    arch = get_encoder_arch_spec(config.model.encoder_type)
+    logger.info("本次训练编码器结构:\n%s", format_encoder_arch_log(config.model.encoder_type, arch))
+
+    encoder_kwargs = get_encoder_build_kwargs(
+        config.model.encoder_type,
+        sample_rate=getattr(config.data, 'sample_rate', 5000),
+        num_substructures=getattr(config.data, 'num_substructures', 4),
+    )
     
     encoder = build_encoder(
         encoder_type=config.model.encoder_type,

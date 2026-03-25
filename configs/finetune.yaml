@@ -1,80 +1,29 @@
-# PA-HCL 微调配置
-# ==================================
-# 下游分类任务的默认配置
-# 
-# 用法:
-#   1. 直接使用任务配置 (推荐):
-#      python scripts/finetune.py --task circor_murmur --pretrained ...
-#   
-#   2. 使用此默认配置 (需要手动指定数据路径):
-#      python scripts/finetune.py --config configs/finetune.yaml --pretrained ...
+# PA-HCL 微调配置（精简版）
+# 说明：编码器结构参数已在代码中统一硬编码。
 
 experiment:
   name: "pahcl_finetune"
   description: "PA-HCL 下游微调"
 
-# 任务设置 (被 --task 参数覆盖)
 task:
   name: "default"
   type: "classification"
 
-# 数据设置
 data:
   sample_rate: 5000
   target_length: 4000
   num_substructures: 4
 
-# 模型 (应与预训练模型匹配)
 model:
-  encoder_type: "cnn_mamba"  # 选项: cnn_mamba, sincnet_eca_mamba
-  
-  # CNN+Mamba 配置 (当 encoder_type="cnn_mamba" 时使用)
-  cnn_channels: [32, 64, 128, 256]
-  cnn_kernel_sizes: [7, 5, 5, 3]
-  cnn_strides: [2, 2, 2, 2]
-  mamba_d_model: 256
-  mamba_n_layers: 4
-  
-  # SinCNeXt-BM 配置 (当 encoder_type="sincnet_eca_mamba" 时使用)
-  # 如果使用新编码器预训练的模型，设置为:
-  # encoder_type: "sincnet_eca_mamba"
-  # sinc_stride: 1
-  # sinc_min_low_hz: 20.0
-  # sinc_max_high_hz: 500.0
-  # local_dim: 128
-  # convnext_kernel_size: 7
-  # mamba_d_model: 128
-  # mamba_n_layers: 6
-  # use_bidirectional: true
-  # pool_type: "asp"
-  # cycle_output_dim: 256
+  encoder_type: "cnn_mamba"  # 可选: cnn_mamba, sincnet_eca_mamba
 
-# 分类器设置
 classifier:
-  hidden_dim: 128  # 设为 null 以使用线性分类器
-  dropout: 0.3
-  use_bn: true     # 使用 BatchNorm
-  use_ln: false    # 使用 LayerNorm
-  num_layers: 1    # 隐藏层数量
-
-# 下游任务默认设置 (向后兼容)
-downstream:
-  num_classes: 2
-  label_map:
-    normal: 0
-    abnormal: 1
   hidden_dim: 128
   dropout: 0.3
-  num_epochs: 100
-  batch_size: 32
-  learning_rate: 1e-3
-  weight_decay: 1e-4
-  warmup_epochs: 5
-  early_stopping_patience: 15
-  label_smoothing: 0.1
-  use_class_weights: true
+  use_bn: true
+  use_ln: false
+  num_layers: 1
 
-# 训练设置
 training:
   num_epochs: 100
   batch_size: 32
@@ -92,15 +41,13 @@ training:
   log_interval: 20
   save_interval: 10
 
-# 预训练检查点
 pretrain:
   checkpoint_path: "checkpoints/pretrain/best_model.pt"
   load_encoder_only: true
   freeze_encoder: false
 
-# 评估设置
 evaluation:
-  primary_metric: "f1_macro"  # 主要评估指标
+  primary_metric: "f1_macro"
   metrics:
     - accuracy
     - f1
@@ -110,5 +57,4 @@ evaluation:
     - recall
   save_confusion_matrix: true
 
-# 可复现性
 seed: 42
